@@ -43,7 +43,7 @@ async function deductStockFIFO(product, qty) {
 
 exports.createTransaction = async (req, res) => {
   try {
-    const { items, customerName, customerPhone, customerId, paymentMethod, amountPaid, discount, notes, type } = req.body;
+    const { items, customerName, customerPhone, customerId, paymentMethod, amountPaid, discount, notes, type, isGrosir } = req.body;
 
     const processedItems = [];
     let subtotal = 0;
@@ -86,10 +86,16 @@ exports.createTransaction = async (req, res) => {
   }
 }
 
-      const itemSubtotal = item.sellPrice * item.quantity;
+      // Mode Grosir: untuk produk fisik, pakai hargaGrosir sebagai harga jual
+      const itemType = productData?.type || item.type;
+      const effectiveSellPrice = (isGrosir === true && itemType === 'fisik' && (productData?.hargaGrosir || item.hargaGrosir))
+        ? (productData?.hargaGrosir || item.hargaGrosir)
+        : item.sellPrice;
+
+      const itemSubtotal = effectiveSellPrice * item.quantity;
       // Untuk tarik_tunai, profit = fee saja (bukan sellPrice - nominal tarik)
       const itemProfit = item.category === 'tarik_tunai'
-        ? (item.sellPrice * item.quantity) + (item.cashback || 0)
+        ? (effectiveSellPrice * item.quantity) + (item.cashback || 0)
         : itemSubtotal - (purchasePrice * item.quantity) + (item.cashback || 0);
 
       processedItems.push({
@@ -99,7 +105,7 @@ exports.createTransaction = async (req, res) => {
   category: productData?.category || item.category,
   type: productData?.type || item.type,
   quantity: item.quantity,
-  sellPrice: item.sellPrice,
+  sellPrice: effectiveSellPrice,
   purchasePrice,
   subtotal: itemSubtotal,
   profit: itemProfit,
@@ -143,6 +149,7 @@ exports.createTransaction = async (req, res) => {
       change: change > 0 ? change : 0,
       transferData: req.body.transferData || null,
       type: type || 'penjualan',
+      isGrosir: isGrosir === true,
       cabang: cabangId,
       cashier: req.user._id,
       cashierName: req.user.name,
@@ -334,7 +341,7 @@ exports.getVoidedTransactions = async (req, res) => {
         .sort('-voidAt')
         .skip(skip)
         .limit(Number(limit))
-        .select('invoiceNumber transactionDate voidAt voidReason voidByName cashierName customerName total paymentMethod items'),
+        .select('invoiceNumber transactionDate voidAt voidReason voidByName cashierName customerName total paymentMethod isGrosir items'),
       Transaction.countDocuments(query)
     ]);
 
@@ -903,7 +910,7 @@ exports.getHutangPelanggan = async (req, res) => {
     };
     const data = await Transaction.find(query)
       .sort('-transactionDate')
-      .select('invoiceNumber transactionDate customerName total paymentStatus paidAt paidBy items');
+      .select('invoiceNumber transactionDate customerName total paymentStatus paidAt paidBy isGrosir items');
     res.json({ success: true, data });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };

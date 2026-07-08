@@ -38,7 +38,7 @@ exports.getProductByCode = async (req, res) => {
 
 exports.createProduct = async (req, res) => {
   try {
-    const { code, name, category, type, sellPrice, purchasePrice, stock, minStock, provider, denomination, description, unit } = req.body;
+    const { code, name, category, type, sellPrice, hargaGrosir, purchasePrice, stock, minStock, provider, denomination, description, unit } = req.body;
 
     const cabangQ = req.cabangFilter || {}; const existing = await Product.findOne({ code: code.toUpperCase(), ...cabangQ });
     if (existing) return res.status(400).json({ success: false, message: 'Kode produk sudah digunakan' });
@@ -48,6 +48,11 @@ exports.createProduct = async (req, res) => {
       provider, denomination, description, unit,
       cabang: req.user.role !== 'superadmin' ? req.user.cabang?._id : null,
     };
+
+    // hargaGrosir hanya relevan untuk produk fisik
+    if (type === 'fisik' && hargaGrosir !== undefined) {
+      productData.hargaGrosir = Number(hargaGrosir) || 0;
+    }
 
     if (type === 'fisik' && stock > 0 && purchasePrice) {
       productData.stock = stock;
@@ -92,6 +97,11 @@ exports.updateProduct = async (req, res) => {
     // sellPrice & minStock pastikan angka
     if (req.body.sellPrice !== undefined) product.sellPrice = Number(req.body.sellPrice);
     if (req.body.minStock !== undefined) product.set({ minStock: Number(req.body.minStock) });
+
+    // hargaGrosir hanya untuk produk fisik
+    if (req.body.hargaGrosir !== undefined && product.type === 'fisik') {
+      product.hargaGrosir = Number(req.body.hargaGrosir) || 0;
+    }
     
 
     await product.save();

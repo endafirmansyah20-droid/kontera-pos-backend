@@ -55,6 +55,7 @@ const transactionSchema = new mongoose.Schema({
   
   notes: { type: String },
   isVoid: { type: Boolean, default: false },
+  isGrosir: { type: Boolean, default: false },
   cabang: { type: mongoose.Schema.Types.ObjectId, ref: 'Cabang', index: true },
   voidReason: { type: String },
   voidAt: { type: Date },

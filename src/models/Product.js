@@ -28,7 +28,10 @@ const productSchema = new mongoose.Schema({
   
   // Harga jual (sama untuk semua batch)
   sellPrice: { type: Number, required: true },
-  
+
+  // Harga grosir (hanya relevan untuk produk type 'fisik'; dipakai saat Mode Grosir)
+  hargaGrosir: { type: Number, default: 0 },
+
   // Untuk produk DIGITAL - harga modal tetap
   purchasePrice: { type: Number },
   

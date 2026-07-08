@@ -52,13 +52,22 @@ exports.getAllSaldo = async (req, res) => {
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
 
-// GET mutasi per akun
+// GET mutasi per akun — 100 terakhir, dalam 1 bulan terakhir
 exports.getMutasi = async (req, res) => {
   try {
     const cabangQ = req.cabangFilter || {};
-    const akun = await Saldo.findOne({ akunId: req.params.akunId, ...cabangQ });
+    const akun = await Saldo.findOne({ akunId: req.params.akunId, ...cabangQ })
+      .populate('mutasi.createdBy', 'name');
     if (!akun) return res.status(404).json({ success: false, message: 'Akun tidak ditemukan' });
-    const mutasi = akun.mutasi.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, 50);
+
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+
+    const mutasi = akun.mutasi
+      .filter(m => new Date(m.createdAt) >= monthStart)
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+      .slice(0, 100);
+
     res.json({ success: true, data: mutasi, akun: { namaAkun: akun.namaAkun, saldo: akun.saldo, icon: akun.icon } });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
@@ -169,7 +178,7 @@ exports.kurangiSaldo = async (akunId, amount, keterangan, userId, refTransaksi) 
 // POST tambah akun saldo baru
 exports.tambahAkun = async (req, res) => {
   try {
-    const { akunId, namaAkun, group, icon } = req.body;
+    const { akunId, namaAkun, group, icon, allowedMenus, menuOrder } = req.body;
     if (!akunId || !namaAkun || !group) {
       return res.status(400).json({ success: false, message: 'akunId, namaAkun, dan group wajib diisi' });
     }
@@ -179,7 +188,14 @@ exports.tambahAkun = async (req, res) => {
     const existing = await Saldo.findOne({ akunId, ...cabangQ });
     if (existing) return res.status(400).json({ success: false, message: 'ID Akun sudah digunakan di cabang ini' });
 
-    const akun = await Saldo.create({ akunId, namaAkun, group, icon: icon || '💳', saldo: 0, cabang: cabangId });
+    const akun = await Saldo.create({
+      akunId, namaAkun, group,
+      icon: icon || '💳',
+      saldo: 0,
+      allowedMenus: Array.isArray(allowedMenus) ? allowedMenus : [],
+      menuOrder:    Array.isArray(menuOrder)    ? menuOrder    : [],
+      cabang: cabangId,
+    });
     res.status(201).json({ success: true, data: akun, message: 'Akun berhasil ditambahkan' });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
@@ -187,11 +203,14 @@ exports.tambahAkun = async (req, res) => {
 // PUT update akun saldo
 exports.updateAkun = async (req, res) => {
   try {
-    const { namaAkun, group, icon, isActive } = req.body;
+    const { namaAkun, group, icon, isActive, allowedMenus, menuOrder } = req.body;
+    const update = { namaAkun, group, icon, isActive };
+    if (allowedMenus !== undefined) update.allowedMenus = Array.isArray(allowedMenus) ? allowedMenus : [];
+    if (menuOrder    !== undefined) update.menuOrder    = Array.isArray(menuOrder)    ? menuOrder    : [];
     const akun = await Saldo.findOneAndUpdate(
       { akunId: req.params.akunId, ...(req.cabangFilter || {}) },
-      { namaAkun, group, icon, isActive },
-      { new: true }
+      update,
+      { new: true, runValidators: true }
     );
     if (!akun) return res.status(404).json({ success: false, message: 'Akun tidak ditemukan' });
     res.json({ success: true, data: akun, message: 'Akun berhasil diupdate' });

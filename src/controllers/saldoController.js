@@ -68,7 +68,7 @@ exports.getMutasi = async (req, res) => {
       .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
       .slice(0, 100);
 
-    res.json({ success: true, data: mutasi, akun: { namaAkun: akun.namaAkun, saldo: akun.saldo, icon: akun.icon } });
+    res.json({ success: true, data: mutasi, akun: { namaAkun: akun.namaAkun, saldo: akun.saldo, icon: akun.icon, iconFile: akun.iconFile } });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
 
@@ -178,7 +178,7 @@ exports.kurangiSaldo = async (akunId, amount, keterangan, userId, refTransaksi) 
 // POST tambah akun saldo baru
 exports.tambahAkun = async (req, res) => {
   try {
-    const { akunId, namaAkun, group, icon, allowedMenus, menuOrder } = req.body;
+    const { akunId, namaAkun, group, icon, iconFile, allowedMenus, menuOrder } = req.body;
     if (!akunId || !namaAkun || !group) {
       return res.status(400).json({ success: false, message: 'akunId, namaAkun, dan group wajib diisi' });
     }
@@ -191,6 +191,7 @@ exports.tambahAkun = async (req, res) => {
     const akun = await Saldo.create({
       akunId, namaAkun, group,
       icon: icon || '💳',
+      iconFile: iconFile || '',
       saldo: 0,
       allowedMenus: Array.isArray(allowedMenus) ? allowedMenus : [],
       menuOrder:    Array.isArray(menuOrder)    ? menuOrder    : [],
@@ -203,8 +204,9 @@ exports.tambahAkun = async (req, res) => {
 // PUT update akun saldo
 exports.updateAkun = async (req, res) => {
   try {
-    const { namaAkun, group, icon, isActive, allowedMenus, menuOrder } = req.body;
+    const { namaAkun, group, icon, iconFile, isActive, allowedMenus, menuOrder } = req.body;
     const update = { namaAkun, group, icon, isActive };
+    if (iconFile     !== undefined) update.iconFile     = iconFile;
     if (allowedMenus !== undefined) update.allowedMenus = Array.isArray(allowedMenus) ? allowedMenus : [];
     if (menuOrder    !== undefined) update.menuOrder    = Array.isArray(menuOrder)    ? menuOrder    : [];
     const akun = await Saldo.findOneAndUpdate(

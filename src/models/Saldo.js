@@ -20,6 +20,7 @@ const saldoSchema = new mongoose.Schema({
   namaAkun: { type: String, required: true },
   group:    { type: String, enum: ['Server Pulsa', 'Bank', 'E-Wallet', 'Tunai'], required: true },
   icon:     { type: String, default: '💳' },
+  iconFile: { type: String, default: '' },
   saldo:    { type: Number, default: 0 },
   isActive: { type: Boolean, default: true },
   cabang:   { type: mongoose.Schema.Types.ObjectId, ref: 'Cabang', index: true },

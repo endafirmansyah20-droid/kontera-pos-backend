@@ -1,6 +1,8 @@
+const mongoose = require('mongoose');
 const Transaction = require('../models/Transaction');
 const { earnPointsAfterTransaction } = require('./pointController');
 const Product = require('../models/Product');
+const Saldo = require('../models/Saldo');
 const { Customer, Finance, StockLog } = require('../models/index');
 
 // Helper: kurangi stok FIFO
@@ -42,141 +44,136 @@ async function deductStockFIFO(product, qty) {
 }
 
 exports.createTransaction = async (req, res) => {
+  const { items, customerName, customerPhone, customerId, paymentMethod, amountPaid, discount, notes, type, isGrosir } = req.body;
+  const session = await mongoose.startSession();
+  let transaction;
+  let earnedPoints = 0;
+
   try {
-    const { items, customerName, customerPhone, customerId, paymentMethod, amountPaid, discount, notes, type, isGrosir } = req.body;
+    await session.withTransaction(async () => {
+      const processedItems = [];
+      let subtotal = 0;
+      let totalProfit = 0;
 
-    const processedItems = [];
-    let subtotal = 0;
-    let totalProfit = 0;
+      for (const item of items) {
+        let purchasePrice = 0;
+        let productData = null;
 
-    for (const item of items) {
-      let purchasePrice = 0;
-      let productData = null;
+        const isRealProduct = item.productId &&
+          !item.productId.toString().startsWith('d-') &&
+          !item.productId.toString().startsWith('trf-') &&
+          !item.productId.toString().startsWith('tt-') &&
+          !item.productId.toString().startsWith('transfer-') &&
+          !item.productId.toString().startsWith('digital-') &&
+          !item.productId.toString().startsWith('jasa-');
 
-      const isRealProduct = item.productId &&
-  !item.productId.toString().startsWith('d-') &&
-  !item.productId.toString().startsWith('trf-') &&
-  !item.productId.toString().startsWith('tt-') &&
-  !item.productId.toString().startsWith('transfer-') &&
-  !item.productId.toString().startsWith('digital-') &&
-  !item.productId.toString().startsWith('jasa-');
+        if (isRealProduct) {
+          const product = await Product.findById(item.productId).session(session);
+          if (!product) throw new Error(`Produk ${item.productName} tidak ditemukan`);
 
- if (isRealProduct) {
-  const product = await Product.findById(item.productId);
-        if (!product) throw new Error(`Produk ${item.productName} tidak ditemukan`);
+          if (product.type === 'fisik') {
+            const { avgCost } = await deductStockFIFO(product, item.quantity);
+            purchasePrice = avgCost;
+            await product.save({ validateBeforeSave: false, session });
 
-        if (product.type === 'fisik') {
-          const { avgCost } = await deductStockFIFO(product, item.quantity);
-          purchasePrice = avgCost;
-          await product.save({ validateBeforeSave: false });
-
-          await StockLog.create({
-            product: product._id, productCode: product.code, productName: product.name,
-            type: 'keluar', quantity: item.quantity, notes: 'Terjual', createdBy: req.user._id
-          });
+            await StockLog.create([{
+              product: product._id, productCode: product.code, productName: product.name,
+              type: 'keluar', quantity: item.quantity, notes: 'Terjual', createdBy: req.user._id
+            }], { session });
+          } else {
+            purchasePrice = product.purchasePrice;
+          }
+          productData = product;
         } else {
-          purchasePrice = product.purchasePrice;
+          purchasePrice = item.purchasePrice || 0;
+          // Untuk jasa, modal = 0, profit = sellPrice penuh
+          if (item.type === 'jasa') {
+            purchasePrice = 0;
+          }
         }
-        productData = product;
-      } else {
-  purchasePrice = item.purchasePrice || 0;
-  // Untuk jasa, modal = 0, profit = sellPrice penuh
-  if (item.type === 'jasa') {
-    purchasePrice = 0;
-  }
-}
 
-      // Mode Grosir: untuk produk fisik, pakai hargaGrosir sebagai harga jual
-      const itemType = productData?.type || item.type;
-      const effectiveSellPrice = (isGrosir === true && itemType === 'fisik' && (productData?.hargaGrosir || item.hargaGrosir))
-        ? (productData?.hargaGrosir || item.hargaGrosir)
-        : item.sellPrice;
+        // Mode Grosir: untuk produk fisik, pakai hargaGrosir sebagai harga jual
+        const itemType = productData?.type || item.type;
+        const effectiveSellPrice = (isGrosir === true && itemType === 'fisik' && (productData?.hargaGrosir || item.hargaGrosir))
+          ? (productData?.hargaGrosir || item.hargaGrosir)
+          : item.sellPrice;
 
-      const itemSubtotal = effectiveSellPrice * item.quantity;
-      // Untuk tarik_tunai, profit = fee saja (bukan sellPrice - nominal tarik)
-      const itemProfit = item.category === 'tarik_tunai'
-        ? (effectiveSellPrice * item.quantity) + (item.cashback || 0)
-        : itemSubtotal - (purchasePrice * item.quantity) + (item.cashback || 0);
+        const itemSubtotal = effectiveSellPrice * item.quantity;
+        // Untuk tarik_tunai, profit = fee saja (bukan sellPrice - nominal tarik)
+        const itemProfit = item.category === 'tarik_tunai'
+          ? (effectiveSellPrice * item.quantity) + (item.cashback || 0)
+          : itemSubtotal - (purchasePrice * item.quantity) + (item.cashback || 0);
 
-      processedItems.push({
-  product: productData?._id,
-  productCode: productData?.code || item.productCode,
-  productName: item.productName,
-  category: productData?.category || item.category,
-  type: productData?.type || item.type,
-  quantity: item.quantity,
-  sellPrice: effectiveSellPrice,
-  purchasePrice,
-  subtotal: itemSubtotal,
-  profit: itemProfit,
-  targetNumber: item.targetNumber,
-  notes: item.notes,
-  cashback: item.cashback || 0,
+        processedItems.push({
+          product: productData?._id,
+          productCode: productData?.code || item.productCode,
+          productName: item.productName,
+          category: productData?.category || item.category,
+          type: productData?.type || item.type,
+          quantity: item.quantity,
+          sellPrice: effectiveSellPrice,
+          purchasePrice,
+          subtotal: itemSubtotal,
+          profit: itemProfit,
+          targetNumber: item.targetNumber,
+          notes: item.notes,
+          cashback: item.cashback || 0,
 
-  // Simpan data saldo digital
-  sumberDana: item.sumberDana || null,
-  sumberDanaLabel: item.sumberDanaLabel || null,
-  sumberDanaIcon: item.sumberDanaIcon || null,
-  modalAmount: item.modalAmount || null,
-  transferData: item.transferData || null,
-  pointValue: productData?.pointValue || 0, // poin custom per produk
-});
+          // Simpan data saldo digital
+          sumberDana: item.sumberDana || null,
+          sumberDanaLabel: item.sumberDanaLabel || null,
+          sumberDanaIcon: item.sumberDanaIcon || null,
+          modalAmount: item.modalAmount || null,
+          transferData: item.transferData || null,
+          pointValue: productData?.pointValue || 0, // poin custom per produk
+        });
 
-      subtotal += itemSubtotal;
-      totalProfit += itemProfit;
-    }
+        subtotal += itemSubtotal;
+        totalProfit += itemProfit;
+      }
 
-    const discountAmt = discount || 0;
-    const total = subtotal - discountAmt;
-    const change = amountPaid ? amountPaid - total : 0;
+      const discountAmt = discount || 0;
+      const total = subtotal - discountAmt;
+      const change = amountPaid ? amountPaid - total : 0;
 
-    const cabangId = req.user.role === 'superadmin'
-      ? (req.body.cabang || null)
-      : (req.user.cabang?._id || req.user.cabang || null);
+      const cabangId = req.user.role === 'superadmin'
+        ? (req.body.cabang || null)
+        : (req.user.cabang?._id || req.user.cabang || null);
 
-    const transaction = await Transaction.create({
-      items: processedItems,
-      customerName: customerName || 'Umum',
-      customerPhone,
-      customer: customerId,
-      subtotal,
-      discount: discountAmt,
-      total,
-      totalProfit,
-      paymentMethod: paymentMethod || 'cash',
-      paymentStatus: paymentMethod === 'hutang' ? 'hutang' : 'lunas',
-      amountPaid,
-      change: change > 0 ? change : 0,
-      transferData: req.body.transferData || null,
-      type: type || 'penjualan',
-      isGrosir: isGrosir === true,
-      cabang: cabangId,
-      cashier: req.user._id,
-      cashierName: req.user.name,
-      notes
-    });
+      // Model.create dengan session HARUS pakai array form
+      const [tx] = await Transaction.create([{
+        items: processedItems,
+        customerName: customerName || 'Umum',
+        customerPhone,
+        customer: customerId,
+        subtotal,
+        discount: discountAmt,
+        total,
+        totalProfit,
+        paymentMethod: paymentMethod || 'cash',
+        paymentStatus: paymentMethod === 'hutang' ? 'hutang' : 'lunas',
+        amountPaid,
+        change: change > 0 ? change : 0,
+        transferData: req.body.transferData || null,
+        type: type || 'penjualan',
+        isGrosir: isGrosir === true,
+        cabang: cabangId,
+        cashier: req.user._id,
+        cashierName: req.user.name,
+        notes
+      }], { session });
+      transaction = tx;
 
-    // Update customer data
-    if (customerId) {
-      await Customer.findByIdAndUpdate(customerId, {
-        $inc: { totalTransactions: 1, totalSpent: total }
-      });
-    }
+      // Update customer data
+      if (customerId) {
+        await Customer.findByIdAndUpdate(customerId, {
+          $inc: { totalTransactions: 1, totalSpent: total }
+        }, { session });
+      }
 
-    // ── Step 2: Earn poin otomatis untuk member ──────────────
-    let earnedPoints = 0;
-    if (customerId && type !== 'hutang') {
-      try {
-        earnedPoints = await earnPointsAfterTransaction(
-          customerId, transaction._id, transaction.items, req.user._id, req.cabangFilter
-        );
-      } catch (e) { /* skip jika gagal earn poin */ }
-    }
-
-    // ── Update Kas Tunai untuk pembayaran cash ────────────────
-    if (paymentMethod === 'cash') {
-      try {
-        const kasTunai = await Saldo.findOne({ akunId: { $regex: '^tunai' }, ...(req.cabangFilter || {}) });
+      // ── Update Kas Tunai untuk pembayaran cash ────────────────
+      if (paymentMethod === 'cash') {
+        const kasTunai = await Saldo.findOne({ akunId: { $regex: '^tunai' }, ...(req.cabangFilter || {}) }).session(session);
         if (kasTunai) {
           const sb = kasTunai.saldo;
           kasTunai.saldo += total;
@@ -188,17 +185,15 @@ exports.createTransaction = async (req, res) => {
             saldoAfter: kasTunai.saldo,
             createdBy: req.user._id
           });
-          await kasTunai.save({ validateBeforeSave: false });
+          await kasTunai.save({ validateBeforeSave: false, session });
         }
-      } catch (e) { /* skip jika gagal update saldo */ }
-    }
+      }
 
-    // ── Kurangi Kas Tunai untuk transaksi Tarik Tunai ─────────
-    // Tarik tunai: kasir keluarkan uang tunai ke pelanggan → kas tunai BERKURANG sebesar nominal
-    try {
+      // ── Kurangi Kas Tunai untuk transaksi Tarik Tunai ─────────
+      // Tarik tunai: kasir keluarkan uang tunai ke pelanggan → kas tunai BERKURANG sebesar nominal
       const tarikItems = transaction.items.filter(i => i.category === 'tarik_tunai');
       if (tarikItems.length > 0) {
-        const kasTunai = await Saldo.findOne({ akunId: { $regex: '^tunai' }, ...(req.cabangFilter || {}) });
+        const kasTunai = await Saldo.findOne({ akunId: { $regex: '^tunai' }, ...(req.cabangFilter || {}) }).session(session);
         if (kasTunai) {
           for (const ti of tarikItems) {
             const nominal = ti.modalAmount || 0;
@@ -215,22 +210,31 @@ exports.createTransaction = async (req, res) => {
               });
             }
           }
-          await kasTunai.save({ validateBeforeSave: false });
+          await kasTunai.save({ validateBeforeSave: false, session });
         }
       }
-    } catch (e) { /* skip */ }
 
-    // Catat hutang jika pembayaran hutang
-    if (paymentMethod === 'hutang') {
-      await Finance.create({
-        type: 'piutang',
-        category: 'Hutang Pelanggan',
-        description: `Hutang dari transaksi ${transaction.invoiceNumber}`,
-        amount: total,
-        relatedParty: customerName,
-        reference: transaction.invoiceNumber,
-        createdBy: req.user._id
-      });
+      // Catat hutang jika pembayaran hutang
+      if (paymentMethod === 'hutang') {
+        await Finance.create([{
+          type: 'piutang',
+          category: 'Hutang Pelanggan',
+          description: `Hutang dari transaksi ${transaction.invoiceNumber}`,
+          amount: total,
+          relatedParty: customerName,
+          reference: transaction.invoiceNumber,
+          createdBy: req.user._id
+        }], { session });
+      }
+    });
+
+    // ── Post-commit: earn poin (di luar transaction — kegagalan tidak perlu rollback state utama) ──
+    if (customerId && type !== 'hutang') {
+      try {
+        earnedPoints = await earnPointsAfterTransaction(
+          customerId, transaction._id, transaction.items, req.user._id, req.cabangFilter
+        );
+      } catch (e) { /* skip jika gagal earn poin */ }
     }
 
     const io = req.app.get('io');
@@ -311,6 +315,8 @@ exports.createTransaction = async (req, res) => {
     }
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
+  } finally {
+    await session.endSession();
   }
 };
 
@@ -414,12 +420,12 @@ exports.getTransaction = async (req, res) => {
 };
 
 exports.voidTransaction = async (req, res) => {
-  try {
-    const { voidReason } = req.body;
+  const { voidReason } = req.body;
 
-    // ── Validasi role karyawan: hanya boleh void transaksi hari ini ──
-    const isPrivileged = ['superadmin', 'owner', 'admin'].includes(req.user.role);
-    if (!isPrivileged) {
+  // ── Validasi role karyawan: hanya boleh void transaksi hari ini (di luar transaction) ──
+  const isPrivileged = ['superadmin', 'owner', 'admin'].includes(req.user.role);
+  if (!isPrivileged) {
+    try {
       const txCheck = await Transaction.findOne({ _id: req.params.id, isVoid: false });
       if (!txCheck) return res.status(400).json({ success: false, message: 'Transaksi tidak ditemukan atau sudah dibatalkan' });
 
@@ -431,147 +437,151 @@ exports.voidTransaction = async (req, res) => {
       if (txDate < today) {
         return res.status(403).json({ success: false, message: 'Karyawan hanya bisa membatalkan transaksi hari ini' });
       }
+    } catch (err) {
+      return res.status(500).json({ success: false, message: err.message });
     }
+  }
 
-    // Atomic check & lock — cegah double void race condition
-    const transaction = await Transaction.findOneAndUpdate(
-      { _id: req.params.id, isVoid: false },
-      { $set: { isVoid: true, voidReason, voidAt: new Date(), voidBy: req.user._id, voidByName: req.user.name } },
-      { new: true }
-    );
-    if (!transaction) return res.status(400).json({ success: false, message: 'Transaksi tidak ditemukan atau sudah dibatalkan' });
+  const session = await mongoose.startSession();
+  let transaction;
+  let raceConflict = false;
 
-    const Saldo = require('../models/Saldo');
-
-    for (const item of transaction.items) {
-
-      // ── FISIK: kembalikan stok + stockBatch ──────────────
-      if (item.type === 'fisik' && item.product) {
-        // FIXED: $inc stock saja tidak cukup — deductStockFIFO butuh stockBatches
-        // Tambahkan batch baru dengan purchasePrice dari item saat transaksi
-        const returnedPurchasePrice = item.purchasePrice || 0;
-        await Product.findByIdAndUpdate(
-          item.product,
-          {
-            $inc: { stock: item.quantity },
-            $push: {
-              stockBatches: {
-                quantity: item.quantity,
-                remainingQty: item.quantity,
-                purchasePrice: returnedPurchasePrice,
-                receivedDate: new Date(),
-                notes: `Retur void: ${voidReason}`
-              }
-            }
-          }
-        );
-        await StockLog.create({
-          product: item.product,
-          productCode: item.productCode,
-          productName: item.productName,
-          type: 'masuk',
-          quantity: item.quantity,
-          notes: `Retur void: ${voidReason}`,
-          createdBy: req.user._id
-        });
+  try {
+    await session.withTransaction(async () => {
+      // Atomic check & lock — cegah double void race condition
+      transaction = await Transaction.findOneAndUpdate(
+        { _id: req.params.id, isVoid: false },
+        { $set: { isVoid: true, voidReason, voidAt: new Date(), voidBy: req.user._id, voidByName: req.user.name } },
+        { new: true, session }
+      );
+      if (!transaction) {
+        raceConflict = true;
+        return; // no-op → transaction commit (tidak ada perubahan yang terjadi)
       }
 
-      // ── DIGITAL: kembalikan saldo ─────────────────────
-      if (item.type === 'digital' && item.sumberDana) {
+      for (const item of transaction.items) {
 
-        if (item.category === 'tarik_tunai') {
-          // Void tarik tunai:
-          // → Kurangi saldo akun sumber (batalkan transfer masuk dari pelanggan)
-          // → Tambah kas tunai kembali (uang balik ke kas)
-          const nominalTarik = item.modalAmount || 0;
+        // ── FISIK: kembalikan stok + stockBatch ──────────────
+        if (item.type === 'fisik' && item.product) {
+          const returnedPurchasePrice = item.purchasePrice || 0;
+          await Product.findByIdAndUpdate(
+            item.product,
+            {
+              $inc: { stock: item.quantity },
+              $push: {
+                stockBatches: {
+                  quantity: item.quantity,
+                  remainingQty: item.quantity,
+                  purchasePrice: returnedPurchasePrice,
+                  receivedDate: new Date(),
+                  notes: `Retur void: ${voidReason}`
+                }
+              }
+            },
+            { session }
+          );
+          await StockLog.create([{
+            product: item.product,
+            productCode: item.productCode,
+            productName: item.productName,
+            type: 'masuk',
+            quantity: item.quantity,
+            notes: `Retur void: ${voidReason}`,
+            createdBy: req.user._id
+          }], { session });
+        }
 
-          if (nominalTarik > 0) {
-            const akunSumber = await Saldo.findOne({ akunId: item.sumberDana, ...(req.cabangFilter||{}) });
-            if (akunSumber) {
-              const sb = akunSumber.saldo;
-              akunSumber.saldo -= nominalTarik;
-              akunSumber.mutasi.push({
-                type: 'keluar',
-                amount: nominalTarik,
-                keterangan: `VOID Tarik Tunai | ${transaction.invoiceNumber}`,
-                saldoBefore: sb,
-                saldoAfter: akunSumber.saldo,
-                createdBy: req.user._id
-              });
-              await akunSumber.save({ validateBeforeSave: false });
-            }
+        // ── DIGITAL: kembalikan saldo ─────────────────────
+        if (item.type === 'digital' && item.sumberDana) {
 
-            const kasTunai = await Saldo.findOne({ akunId: { $regex: '^tunai' }, ...(req.cabangFilter||{}) });
-            if (kasTunai) {
-              const sb = kasTunai.saldo;
-              kasTunai.saldo += nominalTarik;
-              kasTunai.mutasi.push({
-                type: 'masuk',
-                amount: nominalTarik,
-                keterangan: `VOID Tarik Tunai kembali | ${transaction.invoiceNumber}`,
-                saldoBefore: sb,
-                saldoAfter: kasTunai.saldo,
-                createdBy: req.user._id
-              });
-              await kasTunai.save({ validateBeforeSave: false });
-            }
-          }
+          if (item.category === 'tarik_tunai') {
+            // Void tarik tunai:
+            // → Kurangi saldo akun sumber (batalkan transfer masuk dari pelanggan)
+            // → Tambah kas tunai kembali (uang balik ke kas)
+            const nominalTarik = item.modalAmount || 0;
 
-        } else {
-          // Void digital biasa (pulsa, kuota, ewallet, transfer, game, dll):
-          // → Kembalikan modal ke saldo sumber
-          const modalKembali = item.modalAmount || item.purchasePrice || 0;
-          const cashbackKembali = item.cashback || 0;
-
-          if (modalKembali > 0) {
-            const akun = await Saldo.findOne({ akunId: item.sumberDana, cabang: req.user.cabang?._id || req.user.cabang })
-                    || await Saldo.findOne({ akunId: item.sumberDana, ...(req.cabangFilter || {}) })
-                    || await Saldo.findOne({ akunId: item.sumberDana });
-            if (akun) {
-              const sb = akun.saldo;
-              // Kembalikan modal
-              akun.saldo += modalKembali;
-              akun.mutasi.push({
-                type: 'masuk',
-                amount: modalKembali,
-                keterangan: `VOID ${item.productName}${item.targetNumber ? ' → ' + item.targetNumber : ''} | ${transaction.invoiceNumber}`,
-                saldoBefore: sb,
-                saldoAfter: akun.saldo,
-                createdBy: req.user._id
-              });
-              // Kurangi cashback yang sudah diterima
-              if (cashbackKembali > 0) {
-                const sb2 = akun.saldo;
-                akun.saldo -= cashbackKembali;
-                akun.mutasi.push({
+            if (nominalTarik > 0) {
+              const akunSumber = await Saldo.findOne({ akunId: item.sumberDana, ...(req.cabangFilter||{}) }).session(session);
+              if (akunSumber) {
+                const sb = akunSumber.saldo;
+                akunSumber.saldo -= nominalTarik;
+                akunSumber.mutasi.push({
                   type: 'keluar',
-                  amount: cashbackKembali,
-                  keterangan: `VOID Cashback ${item.productName} | ${transaction.invoiceNumber}`,
-                  saldoBefore: sb2,
+                  amount: nominalTarik,
+                  keterangan: `VOID Tarik Tunai | ${transaction.invoiceNumber}`,
+                  saldoBefore: sb,
+                  saldoAfter: akunSumber.saldo,
+                  createdBy: req.user._id
+                });
+                await akunSumber.save({ validateBeforeSave: false, session });
+              }
+
+              const kasTunai = await Saldo.findOne({ akunId: { $regex: '^tunai' }, ...(req.cabangFilter||{}) }).session(session);
+              if (kasTunai) {
+                const sb = kasTunai.saldo;
+                kasTunai.saldo += nominalTarik;
+                kasTunai.mutasi.push({
+                  type: 'masuk',
+                  amount: nominalTarik,
+                  keterangan: `VOID Tarik Tunai kembali | ${transaction.invoiceNumber}`,
+                  saldoBefore: sb,
+                  saldoAfter: kasTunai.saldo,
+                  createdBy: req.user._id
+                });
+                await kasTunai.save({ validateBeforeSave: false, session });
+              }
+            }
+
+          } else {
+            // Void digital biasa (pulsa, kuota, ewallet, transfer, game, dll):
+            // → Kembalikan modal ke saldo sumber
+            const modalKembali = item.modalAmount || item.purchasePrice || 0;
+            const cashbackKembali = item.cashback || 0;
+
+            if (modalKembali > 0) {
+              const akun = await Saldo.findOne({ akunId: item.sumberDana, cabang: req.user.cabang?._id || req.user.cabang }).session(session)
+                      || await Saldo.findOne({ akunId: item.sumberDana, ...(req.cabangFilter || {}) }).session(session)
+                      || await Saldo.findOne({ akunId: item.sumberDana }).session(session);
+              if (akun) {
+                const sb = akun.saldo;
+                // Kembalikan modal
+                akun.saldo += modalKembali;
+                akun.mutasi.push({
+                  type: 'masuk',
+                  amount: modalKembali,
+                  keterangan: `VOID ${item.productName}${item.targetNumber ? ' → ' + item.targetNumber : ''} | ${transaction.invoiceNumber}`,
+                  saldoBefore: sb,
                   saldoAfter: akun.saldo,
                   createdBy: req.user._id
                 });
+                // Kurangi cashback yang sudah diterima
+                if (cashbackKembali > 0) {
+                  const sb2 = akun.saldo;
+                  akun.saldo -= cashbackKembali;
+                  akun.mutasi.push({
+                    type: 'keluar',
+                    amount: cashbackKembali,
+                    keterangan: `VOID Cashback ${item.productName} | ${transaction.invoiceNumber}`,
+                    saldoBefore: sb2,
+                    saldoAfter: akun.saldo,
+                    createdBy: req.user._id
+                  });
+                }
+                await akun.save({ validateBeforeSave: false, session });
               }
-              await akun.save({ validateBeforeSave: false });
             }
           }
         }
       }
-    }
 
-    // isVoid sudah di-set secara atomic di atas
-
-    // ── Kembalikan saldo akun jika pembayaran transfer / qris ──
-    // FIXED: saldo harus DIKURANGI karena uang kembali ke pelanggan (bukan ditambah)
-    // Sebelumnya bug: akunBank.saldo += total (menambah) → seharusnya -= total (mengurangi)
-    if (['transfer', 'qris'].includes(transaction.paymentMethod) && transaction.transferData?.akunId) {
-      try {
+      // ── Kembalikan saldo akun jika pembayaran transfer / qris ──
+      if (['transfer', 'qris'].includes(transaction.paymentMethod) && transaction.transferData?.akunId) {
         const labelMetode = transaction.paymentMethod === 'qris' ? 'QRIS' : 'Transfer';
-        const akunBank = await Saldo.findOne({ akunId: transaction.transferData.akunId, ...(req.cabangFilter||{}) })
-                      || await Saldo.findOne({ akunId: transaction.transferData.akunId });
+        const akunBank = await Saldo.findOne({ akunId: transaction.transferData.akunId, ...(req.cabangFilter||{}) }).session(session)
+                      || await Saldo.findOne({ akunId: transaction.transferData.akunId }).session(session);
         if (akunBank) {
           const sb = akunBank.saldo;
-          akunBank.saldo -= transaction.total; // FIXED: kurangi (void = batalkan masuk tadi)
+          akunBank.saldo -= transaction.total; // kurangi (void = batalkan masuk tadi)
           akunBank.mutasi.push({
             type: 'keluar',
             amount: transaction.total,
@@ -580,14 +590,12 @@ exports.voidTransaction = async (req, res) => {
             saldoAfter: akunBank.saldo,
             createdBy: req.user._id
           });
-          await akunBank.save({ validateBeforeSave: false });
+          await akunBank.save({ validateBeforeSave: false, session });
         }
-      } catch (e) { console.error('Void transfer/qris error:', e.message); }
-    }
-    if (transaction.paymentMethod === 'cash') {
-      try {
-        const kasTunai = await Saldo.findOne({ akunId: 'tunai', ...(req.cabangFilter||{}) })
-                      || await Saldo.findOne({ akunId: 'tunai' });
+      }
+      if (transaction.paymentMethod === 'cash') {
+        const kasTunai = await Saldo.findOne({ akunId: 'tunai', ...(req.cabangFilter||{}) }).session(session)
+                      || await Saldo.findOne({ akunId: 'tunai' }).session(session);
         if (kasTunai) {
           const sb = kasTunai.saldo;
           kasTunai.saldo -= transaction.total;
@@ -599,22 +607,19 @@ exports.voidTransaction = async (req, res) => {
             saldoAfter: kasTunai.saldo,
             createdBy: req.user._id
           });
-          await kasTunai.save({ validateBeforeSave: false });
+          await kasTunai.save({ validateBeforeSave: false, session });
         }
-      } catch (e) { console.error('Void cash error:', e.message); }
-    }
+      }
 
-    // ── Batalkan poin member jika ada ────────────────────────
-    if (transaction.customer) {
-      try {
+      // ── Batalkan poin member jika ada ────────────────────────
+      if (transaction.customer) {
         const PointLog = require('../models/PointLog');
-        const { Customer } = require('../models/index');
 
         // Cari log poin yang berasal dari transaksi ini
         const earnLog = await PointLog.findOne({
           transaction: transaction._id,
           type: 'earn'
-        });
+        }).session(session);
 
         // Kurangi totalTransactions dan totalSpent
         await Customer.findByIdAndUpdate(transaction.customer, {
@@ -622,29 +627,33 @@ exports.voidTransaction = async (req, res) => {
             totalTransactions: -1,
             totalSpent: -(transaction.total || 0)
           }
-        });
+        }, { session });
 
         if (earnLog && earnLog.points > 0) {
-          const customer = await Customer.findById(transaction.customer);
+          const customer = await Customer.findById(transaction.customer).session(session);
           if (customer) {
             // Kurangi poin sebesar yang pernah didapat
             const pointsToDeduct = Math.min(earnLog.points, customer.points);
             customer.points      -= pointsToDeduct;
             customer.totalPoints -= pointsToDeduct;
-            await customer.save();
+            await customer.save({ session });
 
             // Catat di PointLog
-            await PointLog.create({
+            await PointLog.create([{
               customer: transaction.customer,
               type: 'expire',
               points: -pointsToDeduct,
               description: `Poin dibatalkan karena void transaksi ${transaction.invoiceNumber}`,
               transaction: transaction._id,
               createdBy: req.user._id,
-            });
+            }], { session });
           }
         }
-      } catch (e) { console.error('Void poin error:', e.message); }
+      }
+    });
+
+    if (raceConflict) {
+      return res.status(400).json({ success: false, message: 'Transaksi tidak ditemukan atau sudah dibatalkan' });
     }
 
     const io = req.app.get('io');
@@ -653,6 +662,8 @@ exports.voidTransaction = async (req, res) => {
     res.json({ success: true, message: 'Transaksi dibatalkan & saldo dikembalikan' });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
+  } finally {
+    await session.endSession();
   }
 };
 

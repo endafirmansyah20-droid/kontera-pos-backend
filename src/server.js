@@ -8,12 +8,40 @@ require('dotenv').config();
 
 const app = express();
 const server = http.createServer(app);
+
+// CORS whitelist: dev web (localhost:3000), Capacitor Android/iOS webview,
+// dan device lain di LAN (192.168.x.x / 10.x.x.x / 172.16–31.x.x) untuk akses via WiFi
+const staticAllowedOrigins = [
+  'http://localhost:3000',
+  'http://localhost',
+  'https://localhost',
+  'capacitor://localhost',
+  'ionic://localhost',
+];
+const lanOriginRegex = /^https?:\/\/(192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+)(:\d+)?$/;
+
+const isAllowedOrigin = (origin) => {
+  // Native app / curl / Postman kirim origin kosong — allow
+  if (!origin) return true;
+  if (staticAllowedOrigins.includes(origin)) return true;
+  if (lanOriginRegex.test(origin)) return true;
+  return false;
+};
+
+const corsOptions = {
+  origin: (origin, callback) => {
+    if (isAllowedOrigin(origin)) return callback(null, true);
+    return callback(new Error(`Not allowed by CORS: ${origin}`));
+  },
+  credentials: true,
+};
+
 const io = new Server(server, {
-  cors: { origin: 'http://localhost:3000', methods: ['GET', 'POST'] }
+  cors: { origin: corsOptions.origin, methods: ['GET', 'POST'], credentials: true }
 });
 
 // Middleware
-app.use(cors({ origin: 'http://localhost:3000', credentials: true }));
+app.use(cors(corsOptions));
 app.use(express.json());
 app.use(morgan('dev'));
 app.use('/uploads', express.static('uploads'));
@@ -53,9 +81,10 @@ app.use((err, req, res, next) => {
 
 // Connect DB & Start
 const PORT = process.env.PORT || 5000;
+const HOST = process.env.HOST || '0.0.0.0'; // bind ke semua interface supaya bisa diakses dari LAN
 mongoose.connect(process.env.MONGODB_URI)
   .then(() => {
     console.log('✅ MongoDB Connected');
-    server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+    server.listen(PORT, HOST, () => console.log(`🚀 Server running on ${HOST}:${PORT}`));
   })
   .catch(err => console.error('MongoDB Error:', err));

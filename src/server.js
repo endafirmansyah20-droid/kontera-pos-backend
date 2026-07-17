@@ -9,9 +9,13 @@ require('dotenv').config();
 const app = express();
 const server = http.createServer(app);
 
-// CORS whitelist: dev web (localhost:3000), Capacitor Android/iOS webview,
+// CORS whitelist: domain publik PWA, dev web, Capacitor Android/iOS webview,
 // dan device lain di LAN (192.168.x.x / 10.x.x.x / 172.16–31.x.x) untuk akses via WiFi
 const staticAllowedOrigins = [
+  'https://galaxystore.id',
+  'https://www.galaxystore.id',
+  'https://kontera.id',
+  'https://www.kontera.id',
   'http://localhost:3000',
   'http://localhost',
   'https://localhost',
@@ -30,8 +34,10 @@ const isAllowedOrigin = (origin) => {
 
 const corsOptions = {
   origin: (origin, callback) => {
+    // Graceful reject: jangan throw supaya tidak jadi 500 di error handler global.
+    // Origin tak dikenal → browser dapat CORS error normal (ACAO tidak di-set).
     if (isAllowedOrigin(origin)) return callback(null, true);
-    return callback(new Error(`Not allowed by CORS: ${origin}`));
+    return callback(null, false);
   },
   credentials: true,
 };

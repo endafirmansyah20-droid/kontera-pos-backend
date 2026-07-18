@@ -350,6 +350,32 @@ exports.updateFinance = async (req, res) => {
         newData.paidDate       = new Date();
       }
 
+      // ── (3) Hutang/piutang sudah lunas: koreksi selisih amount ───
+      // Skenario: nominal record dikoreksi (typo), saldo di akun tujuan
+      // harus mengikuti selisih (newAmount - oldAmount) supaya konsisten.
+      // Akun tujuan = sumberDana yang tersimpan waktu lunas (fallback tunai).
+      if (isHutangPiutang(oldType) && oldType === newType && oldIsPaid && newIsPaid && newAmount !== oldAmount) {
+        const diff = newAmount - oldAmount;
+        const akun = oldSumber
+          ? await Saldo.findOne({ akunId: oldSumber, ...cabangQ }).session(session)
+          : await Saldo.findOne({ akunId: { $regex: '^tunai' }, ...cabangQ }).session(session);
+        if (akun) {
+          // piutang: nominal naik → saldo naik (delta = +diff)
+          // hutang:  nominal naik → saldo turun (delta = -diff)
+          const isPiutang = oldType === 'piutang';
+          const delta = isPiutang ? diff : -diff;
+          const sb = akun.saldo;
+          akun.saldo += delta;
+          akun.mutasi.push({
+            type: delta > 0 ? 'masuk' : 'keluar',
+            amount: Math.abs(diff),
+            keterangan: `Koreksi nominal ${oldType} (${oldAmount} → ${newAmount}): ${newData.description || oldRecord.description || oldRecord.category || '-'}`,
+            saldoBefore: sb, saldoAfter: akun.saldo, createdBy: req.user?._id
+          });
+          await akun.save({ validateBeforeSave: false, session });
+        }
+      }
+
       // Update record finance (buang field non-schema supaya tidak diserialisasi masuk)
       const { metode: _m, akunId: _a, ...persistData } = newData;
       responseRecord = await Finance.findByIdAndUpdate(req.params.id, persistData, { new: true, session });

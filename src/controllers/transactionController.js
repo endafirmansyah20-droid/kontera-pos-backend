@@ -928,34 +928,43 @@ exports.getHutangPelanggan = async (req, res) => {
 
 // POST bayar hutang pelanggan
 exports.bayarHutang = async (req, res) => {
+  const { Finance } = require('../models/index');
+  const { metode = 'cash', akunId } = req.body; // metode: cash | transfer | qris
+  const cabangQ = req.cabangFilter || {};
+
+  // Validasi metode & akun tujuan SEBELUM mengubah state apapun
+  if (!['cash', 'transfer', 'qris'].includes(metode)) {
+    return res.status(400).json({ success: false, message: 'Metode pembayaran tidak valid' });
+  }
+  if ((metode === 'transfer' || metode === 'qris') && !akunId) {
+    return res.status(400).json({ success: false, message: 'Akun tujuan wajib dipilih untuk pembayaran transfer/QRIS' });
+  }
+
+  const session = await mongoose.startSession();
+  let invoiceNumber;
   try {
-    const transaction = await Transaction.findById(req.params.id);
-    if (!transaction) return res.status(404).json({ success: false, message: 'Transaksi tidak ditemukan' });
-    if (transaction.paymentStatus === 'lunas') return res.status(400).json({ success: false, message: 'Hutang sudah lunas' });
-    if (transaction.isVoid) return res.status(400).json({ success: false, message: 'Transaksi sudah dibatalkan' });
+    await session.withTransaction(async () => {
+      const transaction = await Transaction.findById(req.params.id).session(session);
+      if (!transaction) throw { status: 404, message: 'Transaksi tidak ditemukan' };
+      if (transaction.paymentStatus === 'lunas') throw { status: 400, message: 'Hutang sudah lunas' };
+      if (transaction.isVoid) throw { status: 400, message: 'Transaksi sudah dibatalkan' };
 
-    const Saldo   = require('../models/Saldo');
-    const { Finance } = require('../models/index'); // FIXED: Finance ada di index.js bukan file terpisah
+      // Cari akun tujuan; wajib ada — jangan biarkan fail-silent
+      const akun = metode === 'cash'
+        ? await Saldo.findOne({ akunId: { $regex: '^tunai' }, ...cabangQ }).session(session)
+        : await Saldo.findOne({ akunId, ...cabangQ }).session(session);
+      if (!akun) {
+        throw { status: 400, message: metode === 'cash' ? 'Akun Kas Tunai tidak ditemukan' : 'Akun tujuan tidak ditemukan' };
+      }
 
-    const { metode = 'cash', akunId } = req.body; // metode: cash | transfer | qris
-    const cabangQ = req.cabangFilter || {};
+      // Update status hutang + catat metode bayar
+      transaction.paymentStatus  = 'lunas';
+      transaction.paidAt         = new Date();
+      transaction.paidBy         = req.user._id;
+      transaction.paidWithMetode = metode;
+      await transaction.save({ validateBeforeSave: false, session });
 
-    // Update status hutang + catat metode bayar
-    transaction.paymentStatus  = 'lunas';
-    transaction.paidAt         = new Date();
-    transaction.paidBy         = req.user._id;
-    transaction.paidWithMetode = metode;
-    await transaction.save({ validateBeforeSave: false });
-
-    // Tambah ke akun yang sesuai metode bayar
-    let akun = null;
-    if (metode === 'cash') {
-      akun = await Saldo.findOne({ akunId: { $regex: '^tunai' }, ...cabangQ });
-    } else if ((metode === 'transfer' || metode === 'qris') && akunId) {
-      akun = await Saldo.findOne({ akunId, ...cabangQ });
-    }
-
-    if (akun) {
+      // Tambah saldo + catat mutasi
       const sb = akun.saldo;
       akun.saldo += transaction.total;
       const label = metode === 'cash' ? 'Tunai' : metode === 'qris' ? 'QRIS' : 'Transfer';
@@ -963,22 +972,31 @@ exports.bayarHutang = async (req, res) => {
         type: 'masuk',
         amount: transaction.total,
         keterangan: `Bayar Hutang (${label}) ${transaction.invoiceNumber} - ${transaction.customerName}`,
+        refTransaksi: transaction.invoiceNumber,
         saldoBefore: sb,
         saldoAfter: akun.saldo,
         createdBy: req.user._id
       });
-      await akun.save({ validateBeforeSave: false });
-    }
+      await akun.save({ validateBeforeSave: false, session });
 
-    // Update record finance jika ada
-    await Finance.findOneAndUpdate(
-      { description: { $regex: transaction.invoiceNumber }, type: 'piutang' },
-      { isPaid: true },
-    );
+      // Update record piutang: catat akun tujuan supaya rollback saat delete/edit akurat
+      await Finance.findOneAndUpdate(
+        { description: { $regex: transaction.invoiceNumber }, type: 'piutang' },
+        { isPaid: true, sumberDana: akun.akunId, sumberDanaName: akun.namaAkun, paidDate: new Date() },
+        { session }
+      );
+
+      invoiceNumber = transaction.invoiceNumber;
+    });
 
     const io = req.app.get('io');
     io?.emit('saldoUpdated');
 
-    res.json({ success: true, message: `Hutang ${transaction.invoiceNumber} berhasil dilunasi` });
-  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+    res.json({ success: true, message: `Hutang ${invoiceNumber} berhasil dilunasi` });
+  } catch (err) {
+    if (err && err.status) return res.status(err.status).json({ success: false, message: err.message });
+    res.status(500).json({ success: false, message: err.message });
+  } finally {
+    await session.endSession();
+  }
 };

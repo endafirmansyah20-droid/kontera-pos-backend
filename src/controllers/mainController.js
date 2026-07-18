@@ -49,10 +49,11 @@ exports.getDashboard = async (req, res) => {
       Finance.find({ date: { $gte: todayStart, $lte: todayEnd }, ...cabangQ }),
     ]);
 
-    // ── Top 5 produk terlaris hari ini ───────────────────────
-    const topProductsToday = await Transaction.aggregate([
-      { $match: { transactionDate: { $gte: todayStart, $lte: todayEnd }, type: 'penjualan', isVoid: { $ne: true }, ...cabangQ } },
+    // ── Top 7 produk terlaris bulan ini per kategori (fisik & digital/jasa) ─
+    const buildTopProducts = (typeFilter) => Transaction.aggregate([
+      { $match: { transactionDate: { $gte: monthStart }, type: 'penjualan', isVoid: { $ne: true }, ...cabangQ } },
       { $unwind: '$items' },
+      { $match: typeFilter },
       { $group: {
         _id:         '$items.productCode',
         productName: { $first: '$items.productName' },
@@ -65,8 +66,13 @@ exports.getDashboard = async (req, res) => {
         category:    { $first: '$items.category' },
       }},
       { $sort: { totalQty: -1 } },
-      { $limit: 5 }
+      { $limit: 7 }
     ]);
+    const [topFisik, topDigital] = await Promise.all([
+      buildTopProducts({ 'items.type': 'fisik' }),
+      buildTopProducts({ 'items.type': { $in: ['digital', 'jasa'] } }),
+    ]);
+    const topProductsToday = [...topFisik, ...topDigital];
     const employeeStats = await Transaction.aggregate([
       { $match: { transactionDate: { $gte: monthStart }, type: 'penjualan', isVoid: { $ne: true }, ...cabangQ } },
       { $group: {

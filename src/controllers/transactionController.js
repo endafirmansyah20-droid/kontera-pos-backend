@@ -359,12 +359,26 @@ exports.getVoidedTransactions = async (req, res) => {
 
 exports.getTransactions = async (req, res) => {
   try {
-    const { startDate, endDate, paymentMethod, type, search, page = 1, limit = 20, profitMinus } = req.query;
+    const { startDate, endDate, paymentMethod, type, search, page = 1, limit = 20, profitMinus, year, month } = req.query;
     let query = { isVoid: false, ...(req.cabangFilter || {}) };
     // FIXED: Filter transaksi profit minus (anomali)
     if (profitMinus === 'true') query.totalProfit = { $lt: 0 };
 
-    if (startDate || endDate) {
+    // Filter periode: year/month lebih spesifik, jadi kalau dikirim
+    // mereka menang atas startDate/endDate. Kalau bukan angka valid, diabaikan.
+    const yearNum  = Number.parseInt(year, 10);
+    const monthNum = Number.parseInt(month, 10);
+    const hasYear  = Number.isInteger(yearNum) && yearNum >= 1000 && yearNum <= 9999;
+    const hasMonth = Number.isInteger(monthNum) && monthNum >= 1 && monthNum <= 12;
+
+    if (hasYear) {
+      const startMonthIdx = hasMonth ? monthNum - 1 : 0;
+      const endMonthIdx1  = hasMonth ? monthNum : 12; // "day 0 of next month" trick
+      query.transactionDate = {
+        $gte: new Date(yearNum, startMonthIdx, 1, 0, 0, 0, 0),
+        $lte: new Date(yearNum, endMonthIdx1, 0, 23, 59, 59, 999),
+      };
+    } else if (startDate || endDate) {
       query.transactionDate = {};
       if (startDate) query.transactionDate.$gte = new Date(startDate);
       if (endDate) {

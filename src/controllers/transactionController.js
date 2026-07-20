@@ -172,20 +172,33 @@ exports.createTransaction = async (req, res) => {
       }
 
       // ── Update Kas Tunai untuk pembayaran cash ────────────────
+      // PERF: hindari load+save full mutasi array (bisa puluhan ribu entry
+      // di cabang lama). Projection ke {_id, saldo} lalu updateOne+$push.
       if (paymentMethod === 'cash') {
-        const kasTunai = await Saldo.findOne({ akunId: { $regex: '^tunai' }, ...(req.cabangFilter || {}) }).session(session);
+        const kasTunai = await Saldo.findOne(
+          { akunId: { $regex: '^tunai' }, ...(req.cabangFilter || {}) },
+          { _id: 1, saldo: 1 }
+        ).session(session);
         if (kasTunai) {
           const sb = kasTunai.saldo;
-          kasTunai.saldo += total;
-          kasTunai.mutasi.push({
-            type: 'masuk',
-            amount: total,
-            keterangan: `Transaksi tunai ${transaction.invoiceNumber}`,
-            saldoBefore: sb,
-            saldoAfter: kasTunai.saldo,
-            createdBy: req.user._id
-          });
-          await kasTunai.save({ validateBeforeSave: false, session });
+          const newSaldo = sb + total;
+          await Saldo.updateOne(
+            { _id: kasTunai._id },
+            {
+              $set: { saldo: newSaldo },
+              $push: {
+                mutasi: {
+                  type: 'masuk',
+                  amount: total,
+                  keterangan: `Transaksi tunai ${transaction.invoiceNumber}`,
+                  saldoBefore: sb,
+                  saldoAfter: newSaldo,
+                  createdBy: req.user._id
+                }
+              }
+            },
+            { session }
+          );
         }
       }
 

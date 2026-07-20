@@ -135,7 +135,8 @@ exports.createClosing = async (req, res) => {
 
               await StockLog.create([{
                 product: product._id, productCode: product.code, productName: product.name,
-                type: 'adjustment', quantity: Math.abs(selisihStok),
+                type: selisihStok > 0 ? 'masuk' : 'keluar',
+                quantity: Math.abs(selisihStok),
                 notes: `Closing Produk: ${stokLama} → ${item.stokFisik}`,
                 createdBy: req.user._id
               }], { session });

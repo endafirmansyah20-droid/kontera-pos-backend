@@ -219,13 +219,11 @@ exports.createClosing = async (req, res) => {
             ks.lastResetBy = req.user._id;
           }
 
+          // Stok-plus produk TIDAK menambah pool totalCashPlus — tidak ada uang riil
+          // yang menyertainya (produk plus terjadi karena salah pilih produk saat input
+          // transaksi, bukan uang fisik lebih). Hanya minus riil yang menambah pool.
           const effectiveCashMinus = Math.max(0, cashMinus - cashPlusUsedAmount);
-          const netSelisihProduk = cashPlus - effectiveCashMinus;
-          if (netSelisihProduk > 0) {
-            ks.totalCashPlus += netSelisihProduk;
-          } else if (netSelisihProduk < 0) {
-            ks.totalCashMinus += Math.abs(netSelisihProduk);
-          }
+          if (effectiveCashMinus > 0) ks.totalCashMinus += effectiveCashMinus;
           if (cashPlusUsedAmount > 0) ks.totalCashPlus = Math.max(0, ks.totalCashPlus - cashPlusUsedAmount);
           await ks.save({ session });
 

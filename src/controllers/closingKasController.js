@@ -69,137 +69,189 @@ exports.createClosing = async (req, res) => {
     if (type === 'produk') {
       const { produkItems, catatan, shift, uangPlusSetor, cashPlusUsed } = req.body;
       const cashPlusUsedAmount = parseFloat(cashPlusUsed) || 0;
+      const uangPlusSetorAmount = parseFloat(uangPlusSetor) || 0;
       if (!produkItems || produkItems.length === 0) {
         return res.status(400).json({ success: false, message: 'Tidak ada produk yang dihitung' });
       }
 
-      let cashPlus = 0;
-      let cashMinus = 0;
-      const processedItems = [];
+      const cabangIdForKs = req.user.cabang?._id || req.user.cabang || null;
+      const cabangQ2 = req.cabangFilter || {};
+      const cabangIdRaw = cabangQ2.cabang;
+      const cabangObjId = cabangIdRaw
+        ? (mongoose.Types.ObjectId.isValid(cabangIdRaw)
+            ? new mongoose.Types.ObjectId(String(cabangIdRaw))
+            : cabangIdRaw)
+        : null;
+      const cabangStr = cabangIdRaw ? String(cabangIdRaw) : null;
+      const tunaiKodeKey = `tunai-${(req.user.cabang?.kode || '').toLowerCase()}`;
 
-      for (const item of produkItems) {
-        const product = await Product.findById(item.productId);
-        if (!product) continue;
+      const session = await mongoose.startSession();
+      let closingDoc;
+      try {
+        await session.withTransaction(async () => {
+          let cashPlus = 0;
+          let cashMinus = 0;
+          const processedItems = [];
 
-        const stokSistemSekarang = product.stock;
-        const selisihStok = item.stokFisik - stokSistemSekarang;
-        const nilaiSelisih = selisihStok * product.sellPrice;
+          for (const item of produkItems) {
+            const product = await Product.findById(item.productId).session(session);
+            if (!product) continue;
 
-        if (selisihStok > 0) cashPlus += nilaiSelisih;
-        else if (selisihStok < 0) cashMinus += Math.abs(nilaiSelisih);
+            const stokSistemSekarang = product.stock;
+            const selisihStok = item.stokFisik - stokSistemSekarang;
+            const nilaiSelisih = selisihStok * product.sellPrice;
 
-        processedItems.push({
-          productId: item.productId,
-          productCode: product.code,
-          productName: product.name,
-          stokSistem: stokSistemSekarang,
-          stokFisik: item.stokFisik,
-          selisih: selisihStok,
-          hargaJual: product.sellPrice,
-          nilaiSelisih,
-        });
+            if (selisihStok > 0) cashPlus += nilaiSelisih;
+            else if (selisihStok < 0) cashMinus += Math.abs(nilaiSelisih);
 
-        if (selisihStok !== 0) {
-          const stokLama = product.stock;
-          product.stock = item.stokFisik;
+            processedItems.push({
+              productId: item.productId,
+              productCode: product.code,
+              productName: product.name,
+              stokSistem: stokSistemSekarang,
+              stokFisik: item.stokFisik,
+              selisih: selisihStok,
+              hargaJual: product.sellPrice,
+              nilaiSelisih,
+            });
 
-          if (selisihStok < 0 && product.stockBatches?.length > 0) {
-            let kurang = Math.abs(selisihStok);
-            for (let i = 0; i < product.stockBatches.length && kurang > 0; i++) {
-              const ambil = Math.min(product.stockBatches[i].remainingQty, kurang);
-              product.stockBatches[i].remainingQty -= ambil;
-              kurang -= ambil;
+            if (selisihStok !== 0) {
+              const stokLama = product.stock;
+              product.stock = item.stokFisik;
+
+              if (selisihStok < 0 && product.stockBatches?.length > 0) {
+                let kurang = Math.abs(selisihStok);
+                for (let i = 0; i < product.stockBatches.length && kurang > 0; i++) {
+                  const ambil = Math.min(product.stockBatches[i].remainingQty, kurang);
+                  product.stockBatches[i].remainingQty -= ambil;
+                  kurang -= ambil;
+                }
+                product.stockBatches = product.stockBatches.filter(b => b.remainingQty > 0);
+              } else if (selisihStok > 0 && product.stockBatches?.length > 0) {
+                product.stockBatches[product.stockBatches.length - 1].remainingQty += selisihStok;
+              }
+
+              await product.save({ session });
+
+              await StockLog.create([{
+                product: product._id, productCode: product.code, productName: product.name,
+                type: 'adjustment', quantity: Math.abs(selisihStok),
+                notes: `Closing Produk: ${stokLama} → ${item.stokFisik}`,
+                createdBy: req.user._id
+              }], { session });
             }
-            product.stockBatches = product.stockBatches.filter(b => b.remainingQty > 0);
-          } else if (selisihStok > 0 && product.stockBatches?.length > 0) {
-            product.stockBatches[product.stockBatches.length - 1].remainingQty += selisihStok;
           }
 
-          await product.save();
+          // Ambil/buat KasSummary dalam session (helper tidak session-aware)
+          let ks = await KasSummary.findOne({ cabang: cabangIdForKs || null }).session(session);
+          if (!ks) {
+            const createdKs = await KasSummary.create(
+              [{ totalCashPlus: 0, totalCashMinus: 0, cabang: cabangIdForKs || null }],
+              { session }
+            );
+            ks = createdKs[0];
+          }
 
-          await StockLog.create({
-            product: product._id, productCode: product.code, productName: product.name,
-            type: 'adjustment', quantity: Math.abs(selisihStok),
-            notes: `Closing Produk: ${stokLama} → ${item.stokFisik}`,
-            createdBy: req.user._id
-          });
-        }
-      }
+          // Lookup Saldo Kas Tunai sekali — dipakai untuk uangPlusSetor + cashPlusUsed
+          let kasTunai = null;
+          if (uangPlusSetorAmount > 0 || cashPlusUsedAmount > 0) {
+            kasTunai = cabangObjId
+              ? (await Saldo.findOne({ akunId: 'tunai', $or: [{ cabang: cabangObjId }, { cabang: cabangStr }] }).session(session))
+                || (await Saldo.findOne({ akunId: tunaiKodeKey }).session(session))
+              : await Saldo.findOne({ akunId: tunaiKodeKey }).session(session);
+          }
 
-      // Proses Uang Plus Setor
-      const uangPlusSetorAmount = parseFloat(uangPlusSetor) || 0;
-      const cabangIdForKs = req.user.cabang?._id || req.user.cabang || null;
-      const ks = await getKasSummary(cabangIdForKs);
-
-      // Update kas tunai jika ada uang plus yang disetor
-      if (uangPlusSetorAmount > 0) {
-        // FIXED: Prioritaskan tunai+cabang dulu, baru fallback ke tunai-kode
-    // FIXED: Konversi cabang ke ObjectId agar query MongoDB cocok
-    const cabangQ2 = req.cabangFilter || {};
-    const cabangIdRaw = cabangQ2.cabang;
-    const cabangObjId = cabangIdRaw ? (mongoose.Types.ObjectId.isValid(cabangIdRaw) ? new mongoose.Types.ObjectId(String(cabangIdRaw)) : cabangIdRaw) : null;
-    // FIXED: Support cabang tersimpan sebagai String atau ObjectId
-    const cabangStr = cabangIdRaw ? String(cabangIdRaw) : null;
-    const kasTunai = cabangObjId
-      ? await Saldo.findOne({ akunId: 'tunai', $or: [{ cabang: cabangObjId }, { cabang: cabangStr }] })
-        || await Saldo.findOne({ akunId: `tunai-${(req.user.cabang?.kode||'').toLowerCase()}` })
-      : await Saldo.findOne({ akunId: `tunai-${(req.user.cabang?.kode||'').toLowerCase()}` });
-        if (kasTunai) {
-          const sb = kasTunai.saldo;
-          const newSaldo = sb + uangPlusSetorAmount;
-          // FIXED: Pakai updateOne agar tidak trigger validasi mutasi lama
-          await Saldo.updateOne(
-            { _id: kasTunai._id },
-            {
-              $set: { saldo: newSaldo },
-              $push: {
-                mutasi: {
-                  type: 'masuk',
-                  amount: uangPlusSetorAmount,
-                  keterangan: `Setor Uang Plus dari Closing Cash → Closing Produk`,
-                  saldoBefore: sb,
-                  saldoAfter: newSaldo,
-                  createdBy: req.user._id,
-                  date: new Date()
+          // Setor sisa Uang Plus → Kas Tunai
+          if (uangPlusSetorAmount > 0 && kasTunai) {
+            const sb = kasTunai.saldo;
+            const newSaldo = sb + uangPlusSetorAmount;
+            await Saldo.updateOne(
+              { _id: kasTunai._id },
+              {
+                $set: { saldo: newSaldo },
+                $push: {
+                  mutasi: {
+                    type: 'masuk',
+                    amount: uangPlusSetorAmount,
+                    keterangan: `Setor Uang Plus dari Closing Cash → Closing Produk`,
+                    saldoBefore: sb,
+                    saldoAfter: newSaldo,
+                    createdBy: req.user._id,
+                    date: new Date()
+                  }
                 }
-              }
-            }
-          );
-        }
+              },
+              { session }
+            );
+            kasTunai.saldo = newSaldo; // sinkronkan local copy untuk mutasi berikutnya
+          }
 
-        // Reset Cash Plus kumulatif
-        ks.totalCashPlus = Math.max(0, ks.totalCashPlus - uangPlusSetorAmount);
-        ks.lastResetCashPlus = new Date();
-        ks.lastResetBy = req.user._id;
+          // Setor Cash Plus yang dipakai tutup selisih produk → Kas Tunai
+          // (uang riil pendapatan sah — fisik sudah dipisah saat Closing Cash, sekarang masuk balik)
+          if (cashPlusUsedAmount > 0 && kasTunai) {
+            const sb = kasTunai.saldo;
+            const newSaldo = sb + cashPlusUsedAmount;
+            await Saldo.updateOne(
+              { _id: kasTunai._id },
+              {
+                $set: { saldo: newSaldo },
+                $push: {
+                  mutasi: {
+                    type: 'masuk',
+                    amount: cashPlusUsedAmount,
+                    keterangan: `Setor Cash Plus (dipakai tutup selisih produk) — Closing Produk`,
+                    saldoBefore: sb,
+                    saldoAfter: newSaldo,
+                    createdBy: req.user._id,
+                    date: new Date()
+                  }
+                }
+              },
+              { session }
+            );
+            kasTunai.saldo = newSaldo;
+          }
+
+          // Update pool Cash Plus & Minus (logika tidak diubah)
+          if (uangPlusSetorAmount > 0) {
+            ks.totalCashPlus = Math.max(0, ks.totalCashPlus - uangPlusSetorAmount);
+            ks.lastResetCashPlus = new Date();
+            ks.lastResetBy = req.user._id;
+          }
+
+          const effectiveCashMinus = Math.max(0, cashMinus - cashPlusUsedAmount);
+          const netSelisihProduk = cashPlus - effectiveCashMinus;
+          if (netSelisihProduk > 0) {
+            ks.totalCashPlus += netSelisihProduk;
+          } else if (netSelisihProduk < 0) {
+            ks.totalCashMinus += Math.abs(netSelisihProduk);
+          }
+          if (cashPlusUsedAmount > 0) ks.totalCashPlus = Math.max(0, ks.totalCashPlus - cashPlusUsedAmount);
+          await ks.save({ session });
+
+          const [created] = await ClosingKas.create([{
+            type: 'produk', shift: shift || 'full',
+            produkItems: processedItems,
+            totalSelisihProduk: processedItems.filter(p => p.selisih !== 0).length,
+            cashPlus, cashMinus, netCash: cashPlus - cashMinus,
+            uangPlusSetor: uangPlusSetorAmount,
+            uangPlusReset: uangPlusSetorAmount > 0,
+            cashPlusUsed: cashPlusUsedAmount,
+            catatan, createdBy: req.user._id, createdByName: req.user.name,
+            cabang: req.user.cabang?._id || req.user.cabang || null,
+            saldoSistem: 0, totalFisik: 0, selisih: 0, statusSelisih: 'sesuai',
+            totalPemasukanCash: 0, totalPengeluaranCash: 0,
+            totalTransaksiCash: 0, jumlahTransaksi: 0, totalQris: 0, totalTransfer: 0,
+          }], { session });
+          closingDoc = created;
+        });
+
+        return res.status(201).json({ success: true, data: closingDoc });
+      } catch (err) {
+        return res.status(500).json({ success: false, message: err.message });
+      } finally {
+        await session.endSession();
       }
-
-      // Tambah Cash Plus & Minus dari closing produk ke kumulatif
-      // FIXED: cashPlusUsed mengurangi cashMinus (cash plus dipakai tutup selisih produk)
-      const effectiveCashMinus = Math.max(0, cashMinus - cashPlusUsedAmount);
-      const netSelisihProduk = cashPlus - effectiveCashMinus;
-if (netSelisihProduk > 0) {
-  ks.totalCashPlus += netSelisihProduk;
-} else if (netSelisihProduk < 0) {
-  ks.totalCashMinus += Math.abs(netSelisihProduk);
-}
-      // FIXED: Kurangi totalCashPlus jika cashPlusUsed dipakai tutup minus produk
-      if (cashPlusUsedAmount > 0) ks.totalCashPlus = Math.max(0, ks.totalCashPlus - cashPlusUsedAmount);
-      await ks.save();
-
-      const closing = await ClosingKas.create({
-        type: 'produk', shift: shift || 'full',
-        produkItems: processedItems,
-        totalSelisihProduk: processedItems.filter(p => p.selisih !== 0).length,
-        cashPlus, cashMinus, netCash: cashPlus - cashMinus,
-        uangPlusSetor: uangPlusSetorAmount,
-        uangPlusReset: uangPlusSetorAmount > 0,
-        catatan, createdBy: req.user._id, createdByName: req.user.name, cabang: req.user.cabang?._id || req.user.cabang || null,
-        saldoSistem: 0, totalFisik: 0, selisih: 0, statusSelisih: 'sesuai',
-        totalPemasukanCash: 0, totalPengeluaranCash: 0,
-        totalTransaksiCash: 0, jumlahTransaksi: 0, totalQris: 0, totalTransfer: 0,
-      });
-
-      return res.status(201).json({ success: true, data: closing });
     }
 
     // ── CLOSING CASH ──────────────────────────────────────

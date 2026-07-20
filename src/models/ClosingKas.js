@@ -36,6 +36,8 @@ netCash: { type: Number, default: 0 },
 // Uang Plus yang disetorkan saat closing produk
 uangPlusSetor: { type: Number, default: 0 },
 uangPlusReset: { type: Boolean, default: false },
+// Cash Plus yang dipakai menutup selisih minus produk di sesi closing ini
+cashPlusUsed: { type: Number, default: 0 },
 totalQris: { type: Number, default: 0 },
 totalTransfer: { type: Number, default: 0 },
 

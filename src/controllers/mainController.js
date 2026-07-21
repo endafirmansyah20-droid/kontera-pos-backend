@@ -556,33 +556,6 @@ exports.getCustomers = async (req, res) => {
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
 
-// ── Helper: Sync nomor member ke Google Contacts ─────────────
-async function syncToGoogleContacts(name, phone) {
-  try {
-    if (!phone || !process.env.GOOGLE_REFRESH_TOKEN) return;
-    const { google } = require('googleapis');
-    const oauth2Client = new google.auth.OAuth2(
-      process.env.GOOGLE_CLIENT_ID,
-      process.env.GOOGLE_CLIENT_SECRET,
-      'urn:ietf:wg:oauth:2.0:oob'
-    );
-    oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
-    const people = google.people({ version: 'v1', auth: oauth2Client });
-
-    // Format nomor ke 62xxx
-    const phoneFormatted = phone.replace(/^0/, '62').replace(/[^0-9]/g, '');
-
-    await people.people.createContact({
-      requestBody: {
-        names: [{ givenName: name || 'Member KonterA' }],
-        phoneNumbers: [{ value: phoneFormatted, type: 'mobile' }],
-        biographies: [{ value: 'Member KonterA POS System', contentType: 'TEXT_PLAIN' }],
-      }
-    });
-    console.log('Google Contacts synced:', name, phoneFormatted);
-  } catch (e) { console.error('Google Contacts sync error:', e.message); }
-}
-
 exports.createCustomer = async (req, res) => {
   try {
     const cabangId = req.user.role === 'superadmin' ? null : (req.user.cabang?._id || req.user.cabang || null);
@@ -594,10 +567,6 @@ exports.createCustomer = async (req, res) => {
     }
 
     const customer = await Customer.create({ ...req.body, cabang: cabangId });
-    // Sync ke Google Contacts jika member dan punya nomor HP
-    if (customer.isMember && customer.phone) {
-      syncToGoogleContacts(customer.name, customer.phone).catch(() => {});
-    }
     res.status(201).json({ success: true, data: customer });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
@@ -605,10 +574,6 @@ exports.createCustomer = async (req, res) => {
 exports.updateCustomer = async (req, res) => {
   try {
     const customer = await Customer.findByIdAndUpdate(req.params.id, req.body, { new: true });
-    // Sync ke Google Contacts jika baru jadi member
-    if (req.body.isMember && customer.phone) {
-      syncToGoogleContacts(customer.name, customer.phone).catch(() => {});
-    }
     res.json({ success: true, data: customer });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };

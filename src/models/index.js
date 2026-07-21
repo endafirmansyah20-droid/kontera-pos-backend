@@ -58,14 +58,6 @@ const settingsSchema = new mongoose.Schema({
     minRedeemPoints:  { type: Number, default: 100 },
     enabled:          { type: Boolean, default: true },
   },
-  // ── Pengaturan Fonnte (WA Notifikasi) ────────
-  // Disimpan per settings cabang, tapi 1 owner bisa pakai 1 token untuk semua cabang
-  fonnteSettings: {
-    token:    { type: String, default: '' }, // API token dari fonnte.com
-    device:   { type: String, default: '' }, // Nomor HP device (format: 628xxx)
-    enabled:  { type: Boolean, default: false },
-    template: { type: String, default: 'Halo {nama}! 👋\nTerima kasih sudah berbelanja di {toko}.\n\n{rincian}\n\n💰 Total: {total}\n⭐ Poin didapat: +{poin} poin\n🏆 Total poin kamu: {totalPoin} poin\n\nSampai jumpa lagi! 🙏' },
-  },
   // ── Pengaturan Marquee Motivasi ─────────────
   marqueeSettings: {
     enabled:  { type: Boolean, default: true },

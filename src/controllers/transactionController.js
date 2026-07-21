@@ -269,77 +269,7 @@ exports.createTransaction = async (req, res) => {
     io?.emit('stockUpdated');
 
     const populated = await Transaction.findById(transaction._id).populate('customer', 'name phone');
-
-    // ── Step 5: Kirim WA notifikasi via Fonnte (NON-BLOCKING) ──
-    // Transaksi selesai dulu, WA dikirim di background
     res.status(201).json({ success: true, data: populated, earnedPoints });
-
-    // Fire and forget - tidak mempengaruhi response transaksi
-    if (earnedPoints > 0 && customerId) {
-      setTimeout(async () => {
-        try {
-          const { Settings } = require('../models/index');
-          const cabangQ = req.cabangFilter || {};
-          const settings = await Settings.findOne(cabangQ) || await Settings.findOne();
-          const fonnte = settings?.fonnteSettings;
-
-          if (!fonnte?.enabled || !fonnte?.token || !fonnte?.device) return;
-
-          const customer = await require('../models/index').Customer.findById(customerId).select('name phone points');
-          const phone = customer?.phone?.replace(/^0/, '62').replace(/[^0-9]/g, '');
-          if (!phone || phone.length < 10) return;
-
-          // Render rincian transaksi
-          const fmt = (n) => `Rp ${Number(n||0).toLocaleString('id-ID')}`;
-          let rincian = '';
-          if (transaction.type === 'tarik_tunai') {
-            const nominal = transaction.items?.[0]?.subtotal || 0;
-            const admin   = transaction.total - nominal;
-            rincian = `💸 Tarik Tunai\nNominal: ${fmt(nominal)}\nAdmin: ${fmt(admin)}`;
-          } else {
-            const lines = (transaction.items || []).map(item => {
-              const qty = item.quantity || 1;
-              return `- ${item.productName} x${qty} = ${fmt(item.subtotal)}`;
-            });
-            rincian = `🧾 Rincian Transaksi:\n${lines.join('\n')}`;
-          }
-
-          // Render template pesan
-          const defaultTemplate = 'Halo {nama}! 👋\nTerima kasih sudah berbelanja di {toko}.\n\n{rincian}\n\n💰 Total: {total}\n⭐ Poin didapat: +{poin} poin\n🏆 Total poin kamu: {totalPoin} poin\n\nSampai jumpa lagi! 🙏';
-          const template = fonnte.template || defaultTemplate;
-          const pesan = template
-            .replace('{nama}',      customer.name || 'Pelanggan')
-            .replace('{toko}',      settings.storeName || 'Toko Kami')
-            .replace('{rincian}',   rincian)
-            .replace('{total}',     fmt(transaction.total))
-            .replace('{poin}',      `+${earnedPoints}`)
-            .replace('{totalPoin}', (customer.points || 0).toLocaleString('id-ID'))
-            .replace('{invoice}',   transaction.invoiceNumber || '');
-
-          // Kirim ke Fonnte API
-          const https = require('https');
-          const postData = JSON.stringify({ target: phone, message: pesan, device: fonnte.device });
-          const options = {
-            hostname: 'api.fonnte.com',
-            path: '/send',
-            method: 'POST',
-            headers: {
-              'Authorization': fonnte.token,
-              'Content-Type': 'application/json',
-              'Content-Length': Buffer.byteLength(postData)
-            }
-          };
-          const req2 = https.request(options, (res2) => {
-            let data = '';
-            res2.on('data', d => data += d);
-            res2.on('end', () => console.log('Fonnte WA sent:', phone, data));
-          });
-          req2.on('error', e => console.error('Fonnte error:', e.message));
-          req2.write(postData);
-          req2.end();
-        } catch (e) { console.error('WA notification error:', e.message); }
-      }, 15000); // delay 15 detik di background
-    }
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   } finally {

@@ -3,20 +3,17 @@
  * -------------------------------
  * Script ini TIDAK menulis apa-apa ke database. Aman dijalankan kapan saja.
  *
- * Menjalankan 4 query verifikasi untuk investigasi lambatnya input transaksi
+ * Menjalankan 3 query verifikasi untuk investigasi lambatnya input transaksi
  * di cabang GALAXY7158:
  *
- *   1) fonnteSettings.enabled untuk GALAXY7158
- *      → memastikan hipotesis WhatsApp memang sudah dimatikan
- *
- *   2) Ukuran mutasi array di semua Saldo GALAXY7158
+ *   1) Ukuran mutasi array di semua Saldo GALAXY7158
  *      → mendeteksi doc Saldo dengan mutasi array yang membengkak
  *        (kandidat root cause utama slowness di createTransaction)
  *
- *   3) Perbandingan ukuran mutasi Kas Tunai (akunId ~ ^tunai) SEMUA cabang
+ *   2) Perbandingan ukuran mutasi Kas Tunai (akunId ~ ^tunai) SEMUA cabang
  *      → apakah GALAXY7158 outlier dibanding cabang lain?
  *
- *   4) Jumlah dokumen transactions per cabang
+ *   3) Jumlah dokumen transactions per cabang
  *      → gambaran umum umur/volume tiap cabang
  *
  * Cara pakai:
@@ -69,29 +66,8 @@ function fmtRow(cols, widths) {
 
   console.log(`Target cabang: ${cabang.kode} (${cabang.nama || '-'}) — _id=${cabang._id}`);
 
-  // ── 1) fonnteSettings ─────────────────────────────────────────
-  sep(`1) fonnteSettings.enabled untuk ${KODE_TARGET}`);
-  const settings = await db.collection('settings').findOne(
-    { cabang: cabang._id },
-    { projection: { fonnteSettings: 1, storeName: 1, cabang: 1 } }
-  );
-  if (!settings) {
-    console.log('(tidak ada dokumen Settings khusus untuk cabang ini — fallback ke Settings global)');
-    const global = await db.collection('settings').findOne(
-      { cabang: { $exists: false } },
-      { projection: { fonnteSettings: 1, storeName: 1 } }
-    );
-    console.log('Settings global fonnteSettings:', JSON.stringify(global?.fonnteSettings || null, null, 2));
-  } else {
-    console.log('storeName        :', settings.storeName || '-');
-    console.log('fonnteSettings   :', JSON.stringify(settings.fonnteSettings || null, null, 2));
-    const enabled = settings.fonnteSettings?.enabled;
-    console.log('');
-    console.log(`→ enabled = ${enabled === true ? 'TRUE (WA aktif)' : 'FALSE (WA mati)'}`);
-  }
-
-  // ── 2) Ukuran mutasi array untuk SEMUA Saldo GALAXY7158 ───────
-  sep(`2) Ukuran mutasi array di semua Saldo cabang ${KODE_TARGET}`);
+  // ── 1) Ukuran mutasi array untuk SEMUA Saldo GALAXY7158 ───────
+  sep(`1) Ukuran mutasi array di semua Saldo cabang ${KODE_TARGET}`);
   const saldosTarget = await db.collection('saldos').aggregate([
     { $match: { cabang: cabang._id } },
     {
@@ -124,8 +100,8 @@ function fmtRow(cols, widths) {
     }
   }
 
-  // ── 3) Perbandingan Kas Tunai antar cabang ────────────────────
-  sep('3) Perbandingan ukuran mutasi Kas Tunai (akunId ~ ^tunai) SEMUA cabang');
+  // ── 2) Perbandingan Kas Tunai antar cabang ────────────────────
+  sep('2) Perbandingan ukuran mutasi Kas Tunai (akunId ~ ^tunai) SEMUA cabang');
   const kasSemua = await db.collection('saldos').aggregate([
     { $match: { akunId: /^tunai/ } },
     {
@@ -166,8 +142,8 @@ function fmtRow(cols, widths) {
     }
   }
 
-  // ── 4) Count transactions per cabang ──────────────────────────
-  sep('4) Jumlah dokumen transactions per cabang');
+  // ── 3) Count transactions per cabang ──────────────────────────
+  sep('3) Jumlah dokumen transactions per cabang');
   const txPerCabang = await db.collection('transactions').aggregate([
     { $group: { _id: '$cabang', count: { $sum: 1 } } },
     {

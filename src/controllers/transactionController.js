@@ -204,26 +204,40 @@ exports.createTransaction = async (req, res) => {
 
       // ── Kurangi Kas Tunai untuk transaksi Tarik Tunai ─────────
       // Tarik tunai: kasir keluarkan uang tunai ke pelanggan → kas tunai BERKURANG sebesar nominal
+      // PERF: pola sama dengan cash createTransaction — projection minimal + updateOne+$push per entry.
       const tarikItems = transaction.items.filter(i => i.category === 'tarik_tunai');
       if (tarikItems.length > 0) {
-        const kasTunai = await Saldo.findOne({ akunId: { $regex: '^tunai' }, ...(req.cabangFilter || {}) }).session(session);
+        const kasTunai = await Saldo.findOne(
+          { akunId: { $regex: '^tunai' }, ...(req.cabangFilter || {}) },
+          { _id: 1, saldo: 1 }
+        ).session(session);
         if (kasTunai) {
+          let running = kasTunai.saldo;
           for (const ti of tarikItems) {
             const nominal = ti.modalAmount || 0;
             if (nominal > 0) {
-              const sb = kasTunai.saldo;
-              kasTunai.saldo -= nominal;
-              kasTunai.mutasi.push({
-                type: 'keluar',
-                amount: nominal,
-                keterangan: `Tarik Tunai ${transaction.invoiceNumber} — kas keluar ke pelanggan`,
-                saldoBefore: sb,
-                saldoAfter: kasTunai.saldo,
-                createdBy: req.user._id
-              });
+              const sb = running;
+              const newSaldo = sb - nominal;
+              await Saldo.updateOne(
+                { _id: kasTunai._id },
+                {
+                  $set: { saldo: newSaldo },
+                  $push: {
+                    mutasi: {
+                      type: 'keluar',
+                      amount: nominal,
+                      keterangan: `Tarik Tunai ${transaction.invoiceNumber} — kas keluar ke pelanggan`,
+                      saldoBefore: sb,
+                      saldoAfter: newSaldo,
+                      createdBy: req.user._id
+                    }
+                  }
+                },
+                { session }
+              );
+              running = newSaldo;
             }
           }
-          await kasTunai.save({ validateBeforeSave: false, session });
         }
       }
 
@@ -528,34 +542,56 @@ exports.voidTransaction = async (req, res) => {
             const nominalTarik = item.modalAmount || 0;
 
             if (nominalTarik > 0) {
-              const akunSumber = await Saldo.findOne({ akunId: item.sumberDana, ...(req.cabangFilter||{}) }).session(session);
+              const akunSumber = await Saldo.findOne(
+                { akunId: item.sumberDana, ...(req.cabangFilter||{}) },
+                { _id: 1, saldo: 1 }
+              ).session(session);
               if (akunSumber) {
                 const sb = akunSumber.saldo;
-                akunSumber.saldo -= nominalTarik;
-                akunSumber.mutasi.push({
-                  type: 'keluar',
-                  amount: nominalTarik,
-                  keterangan: `VOID Tarik Tunai | ${transaction.invoiceNumber}`,
-                  saldoBefore: sb,
-                  saldoAfter: akunSumber.saldo,
-                  createdBy: req.user._id
-                });
-                await akunSumber.save({ validateBeforeSave: false, session });
+                const newSaldo = sb - nominalTarik;
+                await Saldo.updateOne(
+                  { _id: akunSumber._id },
+                  {
+                    $set: { saldo: newSaldo },
+                    $push: {
+                      mutasi: {
+                        type: 'keluar',
+                        amount: nominalTarik,
+                        keterangan: `VOID Tarik Tunai | ${transaction.invoiceNumber}`,
+                        saldoBefore: sb,
+                        saldoAfter: newSaldo,
+                        createdBy: req.user._id
+                      }
+                    }
+                  },
+                  { session }
+                );
               }
 
-              const kasTunai = await Saldo.findOne({ akunId: { $regex: '^tunai' }, ...(req.cabangFilter||{}) }).session(session);
+              const kasTunai = await Saldo.findOne(
+                { akunId: { $regex: '^tunai' }, ...(req.cabangFilter||{}) },
+                { _id: 1, saldo: 1 }
+              ).session(session);
               if (kasTunai) {
                 const sb = kasTunai.saldo;
-                kasTunai.saldo += nominalTarik;
-                kasTunai.mutasi.push({
-                  type: 'masuk',
-                  amount: nominalTarik,
-                  keterangan: `VOID Tarik Tunai kembali | ${transaction.invoiceNumber}`,
-                  saldoBefore: sb,
-                  saldoAfter: kasTunai.saldo,
-                  createdBy: req.user._id
-                });
-                await kasTunai.save({ validateBeforeSave: false, session });
+                const newSaldo = sb + nominalTarik;
+                await Saldo.updateOne(
+                  { _id: kasTunai._id },
+                  {
+                    $set: { saldo: newSaldo },
+                    $push: {
+                      mutasi: {
+                        type: 'masuk',
+                        amount: nominalTarik,
+                        keterangan: `VOID Tarik Tunai kembali | ${transaction.invoiceNumber}`,
+                        saldoBefore: sb,
+                        saldoAfter: newSaldo,
+                        createdBy: req.user._id
+                      }
+                    }
+                  },
+                  { session }
+                );
               }
             }
 
@@ -566,35 +602,53 @@ exports.voidTransaction = async (req, res) => {
             const cashbackKembali = item.cashback || 0;
 
             if (modalKembali > 0) {
-              const akun = await Saldo.findOne({ akunId: item.sumberDana, cabang: req.user.cabang?._id || req.user.cabang }).session(session)
-                      || await Saldo.findOne({ akunId: item.sumberDana, ...(req.cabangFilter || {}) }).session(session)
-                      || await Saldo.findOne({ akunId: item.sumberDana }).session(session);
+              const proj = { _id: 1, saldo: 1 };
+              const akun = await Saldo.findOne({ akunId: item.sumberDana, cabang: req.user.cabang?._id || req.user.cabang }, proj).session(session)
+                      || await Saldo.findOne({ akunId: item.sumberDana, ...(req.cabangFilter || {}) }, proj).session(session)
+                      || await Saldo.findOne({ akunId: item.sumberDana }, proj).session(session);
               if (akun) {
                 const sb = akun.saldo;
                 // Kembalikan modal
-                akun.saldo += modalKembali;
-                akun.mutasi.push({
-                  type: 'masuk',
-                  amount: modalKembali,
-                  keterangan: `VOID ${item.productName}${item.targetNumber ? ' → ' + item.targetNumber : ''} | ${transaction.invoiceNumber}`,
-                  saldoBefore: sb,
-                  saldoAfter: akun.saldo,
-                  createdBy: req.user._id
-                });
+                const afterModal = sb + modalKembali;
+                await Saldo.updateOne(
+                  { _id: akun._id },
+                  {
+                    $set: { saldo: afterModal },
+                    $push: {
+                      mutasi: {
+                        type: 'masuk',
+                        amount: modalKembali,
+                        keterangan: `VOID ${item.productName}${item.targetNumber ? ' → ' + item.targetNumber : ''} | ${transaction.invoiceNumber}`,
+                        saldoBefore: sb,
+                        saldoAfter: afterModal,
+                        createdBy: req.user._id
+                      }
+                    }
+                  },
+                  { session }
+                );
                 // Kurangi cashback yang sudah diterima
                 if (cashbackKembali > 0) {
-                  const sb2 = akun.saldo;
-                  akun.saldo -= cashbackKembali;
-                  akun.mutasi.push({
-                    type: 'keluar',
-                    amount: cashbackKembali,
-                    keterangan: `VOID Cashback ${item.productName} | ${transaction.invoiceNumber}`,
-                    saldoBefore: sb2,
-                    saldoAfter: akun.saldo,
-                    createdBy: req.user._id
-                  });
+                  const sb2 = afterModal;
+                  const afterCashback = sb2 - cashbackKembali;
+                  await Saldo.updateOne(
+                    { _id: akun._id },
+                    {
+                      $set: { saldo: afterCashback },
+                      $push: {
+                        mutasi: {
+                          type: 'keluar',
+                          amount: cashbackKembali,
+                          keterangan: `VOID Cashback ${item.productName} | ${transaction.invoiceNumber}`,
+                          saldoBefore: sb2,
+                          saldoAfter: afterCashback,
+                          createdBy: req.user._id
+                        }
+                      }
+                    },
+                    { session }
+                  );
                 }
-                await akun.save({ validateBeforeSave: false, session });
               }
             }
           }
@@ -604,37 +658,55 @@ exports.voidTransaction = async (req, res) => {
       // ── Kembalikan saldo akun jika pembayaran transfer / qris ──
       if (['transfer', 'qris'].includes(transaction.paymentMethod) && transaction.transferData?.akunId) {
         const labelMetode = transaction.paymentMethod === 'qris' ? 'QRIS' : 'Transfer';
-        const akunBank = await Saldo.findOne({ akunId: transaction.transferData.akunId, ...(req.cabangFilter||{}) }).session(session)
-                      || await Saldo.findOne({ akunId: transaction.transferData.akunId }).session(session);
+        const proj = { _id: 1, saldo: 1 };
+        const akunBank = await Saldo.findOne({ akunId: transaction.transferData.akunId, ...(req.cabangFilter||{}) }, proj).session(session)
+                      || await Saldo.findOne({ akunId: transaction.transferData.akunId }, proj).session(session);
         if (akunBank) {
           const sb = akunBank.saldo;
-          akunBank.saldo -= transaction.total; // kurangi (void = batalkan masuk tadi)
-          akunBank.mutasi.push({
-            type: 'keluar',
-            amount: transaction.total,
-            keterangan: `VOID ${labelMetode} | ${transaction.invoiceNumber}`,
-            saldoBefore: sb,
-            saldoAfter: akunBank.saldo,
-            createdBy: req.user._id
-          });
-          await akunBank.save({ validateBeforeSave: false, session });
+          const newSaldo = sb - transaction.total; // kurangi (void = batalkan masuk tadi)
+          await Saldo.updateOne(
+            { _id: akunBank._id },
+            {
+              $set: { saldo: newSaldo },
+              $push: {
+                mutasi: {
+                  type: 'keluar',
+                  amount: transaction.total,
+                  keterangan: `VOID ${labelMetode} | ${transaction.invoiceNumber}`,
+                  saldoBefore: sb,
+                  saldoAfter: newSaldo,
+                  createdBy: req.user._id
+                }
+              }
+            },
+            { session }
+          );
         }
       }
       if (transaction.paymentMethod === 'cash') {
-        const kasTunai = await Saldo.findOne({ akunId: 'tunai', ...(req.cabangFilter||{}) }).session(session)
-                      || await Saldo.findOne({ akunId: 'tunai' }).session(session);
+        const proj = { _id: 1, saldo: 1 };
+        const kasTunai = await Saldo.findOne({ akunId: 'tunai', ...(req.cabangFilter||{}) }, proj).session(session)
+                      || await Saldo.findOne({ akunId: 'tunai' }, proj).session(session);
         if (kasTunai) {
           const sb = kasTunai.saldo;
-          kasTunai.saldo -= transaction.total;
-          kasTunai.mutasi.push({
-            type: 'keluar',
-            amount: transaction.total,
-            keterangan: `VOID Transaksi ${transaction.invoiceNumber}`,
-            saldoBefore: sb,
-            saldoAfter: kasTunai.saldo,
-            createdBy: req.user._id
-          });
-          await kasTunai.save({ validateBeforeSave: false, session });
+          const newSaldo = sb - transaction.total;
+          await Saldo.updateOne(
+            { _id: kasTunai._id },
+            {
+              $set: { saldo: newSaldo },
+              $push: {
+                mutasi: {
+                  type: 'keluar',
+                  amount: transaction.total,
+                  keterangan: `VOID Transaksi ${transaction.invoiceNumber}`,
+                  saldoBefore: sb,
+                  saldoAfter: newSaldo,
+                  createdBy: req.user._id
+                }
+              }
+            },
+            { session }
+          );
         }
       }
 
@@ -783,8 +855,9 @@ exports.editItemTransaksi = async (req, res) => {
 
     // ── Update saldo sumber dana (modal berubah) ──────────
     if (item.sumberDana) {
-      const akun = await Saldo.findOne({ akunId: item.sumberDana, ...(req.cabangFilter || {}) })
-                    || await Saldo.findOne({ akunId: item.sumberDana });
+      const proj = { _id: 1, saldo: 1 };
+      const akun = await Saldo.findOne({ akunId: item.sumberDana, ...(req.cabangFilter || {}) }, proj)
+                    || await Saldo.findOne({ akunId: item.sumberDana }, proj);
       if (akun) {
         let totalSelisih = 0;
 
@@ -803,16 +876,23 @@ exports.editItemTransaksi = async (req, res) => {
 
         if (totalSelisih !== 0) {
           const sb = akun.saldo;
-          akun.saldo += totalSelisih;
-          akun.mutasi.push({
-            type: totalSelisih >= 0 ? 'masuk' : 'keluar',
-            amount: Math.abs(totalSelisih),
-            keterangan: `Edit transaksi ${transaction.invoiceNumber} — penyesuaian modal/cashback`,
-            saldoBefore: sb,
-            saldoAfter: akun.saldo,
-            createdBy: req.user._id
-          });
-          await akun.save({ validateBeforeSave: false });
+          const newSaldo = sb + totalSelisih;
+          await Saldo.updateOne(
+            { _id: akun._id },
+            {
+              $set: { saldo: newSaldo },
+              $push: {
+                mutasi: {
+                  type: totalSelisih >= 0 ? 'masuk' : 'keluar',
+                  amount: Math.abs(totalSelisih),
+                  keterangan: `Edit transaksi ${transaction.invoiceNumber} — penyesuaian modal/cashback`,
+                  saldoBefore: sb,
+                  saldoAfter: newSaldo,
+                  createdBy: req.user._id
+                }
+              }
+            }
+          );
         }
       }
     }
@@ -820,19 +900,29 @@ exports.editItemTransaksi = async (req, res) => {
     // ── Update kas tunai jika bayar cash (harga jual berubah) ──
     const selisihHargaJual = newSellPrice - oldSellPrice;
     if (selisihHargaJual !== 0 && transaction.paymentMethod === 'cash') {
-      const kasTunai = await Saldo.findOne({ akunId: { $regex: '^tunai' }, ...(req.cabangFilter||{}) });
+      const kasTunai = await Saldo.findOne(
+        { akunId: { $regex: '^tunai' }, ...(req.cabangFilter||{}) },
+        { _id: 1, saldo: 1 }
+      );
       if (kasTunai) {
         const sb = kasTunai.saldo;
-        kasTunai.saldo += selisihHargaJual;
-        kasTunai.mutasi.push({
-          type: selisihHargaJual >= 0 ? 'masuk' : 'keluar',
-          amount: Math.abs(selisihHargaJual),
-          keterangan: `Edit harga jual ${transaction.invoiceNumber} — penyesuaian kas tunai`,
-          saldoBefore: sb,
-          saldoAfter: kasTunai.saldo,
-          createdBy: req.user._id
-        });
-        await kasTunai.save({ validateBeforeSave: false });
+        const newSaldo = sb + selisihHargaJual;
+        await Saldo.updateOne(
+          { _id: kasTunai._id },
+          {
+            $set: { saldo: newSaldo },
+            $push: {
+              mutasi: {
+                type: selisihHargaJual >= 0 ? 'masuk' : 'keluar',
+                amount: Math.abs(selisihHargaJual),
+                keterangan: `Edit harga jual ${transaction.invoiceNumber} — penyesuaian kas tunai`,
+                saldoBefore: sb,
+                saldoAfter: newSaldo,
+                createdBy: req.user._id
+              }
+            }
+          }
+        );
       }
     }
 
@@ -842,19 +932,29 @@ exports.editItemTransaksi = async (req, res) => {
     if (item.category === 'tarik_tunai') {
       const selisihNominal = newModalAmount - oldModalAmount;
       if (selisihNominal !== 0) {
-        const kasTunai = await Saldo.findOne({ akunId: { $regex: '^tunai' }, ...(req.cabangFilter||{}) });
+        const kasTunai = await Saldo.findOne(
+          { akunId: { $regex: '^tunai' }, ...(req.cabangFilter||{}) },
+          { _id: 1, saldo: 1 }
+        );
         if (kasTunai) {
           const sb = kasTunai.saldo;
-          kasTunai.saldo -= selisihNominal; // FIXED: kurangi (kas keluar ke pelanggan)
-          kasTunai.mutasi.push({
-            type: selisihNominal >= 0 ? 'keluar' : 'masuk',
-            amount: Math.abs(selisihNominal),
-            keterangan: `Edit tarik tunai ${transaction.invoiceNumber} — penyesuaian kas`,
-            saldoBefore: sb,
-            saldoAfter: kasTunai.saldo,
-            createdBy: req.user._id
-          });
-          await kasTunai.save({ validateBeforeSave: false });
+          const newSaldo = sb - selisihNominal; // FIXED: kurangi (kas keluar ke pelanggan)
+          await Saldo.updateOne(
+            { _id: kasTunai._id },
+            {
+              $set: { saldo: newSaldo },
+              $push: {
+                mutasi: {
+                  type: selisihNominal >= 0 ? 'keluar' : 'masuk',
+                  amount: Math.abs(selisihNominal),
+                  keterangan: `Edit tarik tunai ${transaction.invoiceNumber} — penyesuaian kas`,
+                  saldoBefore: sb,
+                  saldoAfter: newSaldo,
+                  createdBy: req.user._id
+                }
+              }
+            }
+          );
         }
       }
     }
@@ -862,22 +962,31 @@ exports.editItemTransaksi = async (req, res) => {
     // ── Update saldo akun transfer/qris jika bayar transfer/qris ──
     if (selisihHargaJual !== 0 && ['transfer', 'qris'].includes(transaction.paymentMethod)) {
       // Cari akun tujuan dari mutasi saldo yang ada keterangan invoice ini
-      const allSaldos = await Saldo.find({
-        'mutasi.keterangan': { $regex: transaction.invoiceNumber }
-      });
+      // Projection: butuh akunId untuk filter di loop, tapi tidak butuh mutasi array.
+      const allSaldos = await Saldo.find(
+        { 'mutasi.keterangan': { $regex: transaction.invoiceNumber } },
+        { _id: 1, akunId: 1, saldo: 1 }
+      );
       for (const akun of allSaldos) {
         if (akun.akunId === 'tunai' || akun.akunId === item.sumberDana) continue;
         const sb = akun.saldo;
-        akun.saldo += selisihHargaJual;
-        akun.mutasi.push({
-          type: selisihHargaJual >= 0 ? 'masuk' : 'keluar',
-          amount: Math.abs(selisihHargaJual),
-          keterangan: `Edit harga jual ${transaction.invoiceNumber} — penyesuaian saldo`,
-          saldoBefore: sb,
-          saldoAfter: akun.saldo,
-          createdBy: req.user._id
-        });
-        await akun.save({ validateBeforeSave: false });
+        const newSaldo = sb + selisihHargaJual;
+        await Saldo.updateOne(
+          { _id: akun._id },
+          {
+            $set: { saldo: newSaldo },
+            $push: {
+              mutasi: {
+                type: selisihHargaJual >= 0 ? 'masuk' : 'keluar',
+                amount: Math.abs(selisihHargaJual),
+                keterangan: `Edit harga jual ${transaction.invoiceNumber} — penyesuaian saldo`,
+                saldoBefore: sb,
+                saldoAfter: newSaldo,
+                createdBy: req.user._id
+              }
+            }
+          }
+        );
       }
     }
 
@@ -977,9 +1086,11 @@ exports.bayarHutang = async (req, res) => {
       if (transaction.isVoid) throw { status: 400, message: 'Transaksi sudah dibatalkan' };
 
       // Cari akun tujuan; wajib ada — jangan biarkan fail-silent
+      // Projection: _id, saldo, akunId, namaAkun (dipakai untuk update record piutang di bawah).
+      const proj = { _id: 1, saldo: 1, akunId: 1, namaAkun: 1 };
       const akun = metode === 'cash'
-        ? await Saldo.findOne({ akunId: { $regex: '^tunai' }, ...cabangQ }).session(session)
-        : await Saldo.findOne({ akunId, ...cabangQ }).session(session);
+        ? await Saldo.findOne({ akunId: { $regex: '^tunai' }, ...cabangQ }, proj).session(session)
+        : await Saldo.findOne({ akunId, ...cabangQ }, proj).session(session);
       if (!akun) {
         throw { status: 400, message: metode === 'cash' ? 'Akun Kas Tunai tidak ditemukan' : 'Akun tujuan tidak ditemukan' };
       }
@@ -993,18 +1104,26 @@ exports.bayarHutang = async (req, res) => {
 
       // Tambah saldo + catat mutasi
       const sb = akun.saldo;
-      akun.saldo += transaction.total;
+      const newSaldo = sb + transaction.total;
       const label = metode === 'cash' ? 'Tunai' : metode === 'qris' ? 'QRIS' : 'Transfer';
-      akun.mutasi.push({
-        type: 'masuk',
-        amount: transaction.total,
-        keterangan: `Bayar Hutang (${label}) ${transaction.invoiceNumber} - ${transaction.customerName}`,
-        refTransaksi: transaction.invoiceNumber,
-        saldoBefore: sb,
-        saldoAfter: akun.saldo,
-        createdBy: req.user._id
-      });
-      await akun.save({ validateBeforeSave: false, session });
+      await Saldo.updateOne(
+        { _id: akun._id },
+        {
+          $set: { saldo: newSaldo },
+          $push: {
+            mutasi: {
+              type: 'masuk',
+              amount: transaction.total,
+              keterangan: `Bayar Hutang (${label}) ${transaction.invoiceNumber} - ${transaction.customerName}`,
+              refTransaksi: transaction.invoiceNumber,
+              saldoBefore: sb,
+              saldoAfter: newSaldo,
+              createdBy: req.user._id
+            }
+          }
+        },
+        { session }
+      );
 
       // Update record piutang: catat akun tujuan supaya rollback saat delete/edit akurat
       await Finance.findOneAndUpdate(

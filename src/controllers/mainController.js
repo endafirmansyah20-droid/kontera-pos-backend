@@ -223,22 +223,30 @@ exports.createFinance = async (req, res) => {
         const sumberDana = req.body.sumberDana || '';
 
         // Cari akun: kalau ada sumberDana pakai itu, kalau tidak pakai kas tunai
+        const proj = { _id: 1, saldo: 1 };
         const akun = sumberDana
-          ? await Saldo.findOne({ akunId: sumberDana, ...cabangQ })
-          : await Saldo.findOne({ akunId: { $regex: '^tunai' }, ...cabangQ });
+          ? await Saldo.findOne({ akunId: sumberDana, ...cabangQ }, proj)
+          : await Saldo.findOne({ akunId: { $regex: '^tunai' }, ...cabangQ }, proj);
 
         if (akun) {
           const saldoBefore = akun.saldo;
-          akun.saldo += isIncome ? amount : -amount;
-          akun.mutasi.push({
-            type: isIncome ? 'masuk' : 'keluar',
-            amount,
-            keterangan: `${isIncome ? 'Pemasukan' : 'Pengeluaran'}: ${req.body.description || req.body.category || '-'}`,
-            saldoBefore,
-            saldoAfter: akun.saldo,
-            createdBy: req.user._id
-          });
-          await akun.save({ validateBeforeSave: false });
+          const newSaldo = saldoBefore + (isIncome ? amount : -amount);
+          await Saldo.updateOne(
+            { _id: akun._id },
+            {
+              $set: { saldo: newSaldo },
+              $push: {
+                mutasi: {
+                  type: isIncome ? 'masuk' : 'keluar',
+                  amount,
+                  keterangan: `${isIncome ? 'Pemasukan' : 'Pengeluaran'}: ${req.body.description || req.body.category || '-'}`,
+                  saldoBefore,
+                  saldoAfter: newSaldo,
+                  createdBy: req.user._id
+                }
+              }
+            }
+          );
         }
       }
     } catch (e) { /* skip jika saldo gagal update */ }
@@ -272,39 +280,56 @@ exports.updateFinance = async (req, res) => {
       const newIsPaid  = newData.isPaid !== undefined ? (newData.isPaid === true) : oldIsPaid;
 
       // ── (1) Koreksi saldo untuk pemasukan/pengeluaran ─────────────
+      const proj = { _id: 1, saldo: 1 };
       if (isFinanceType(oldType) || isFinanceType(newType)) {
         // Kembalikan efek saldo LAMA
         if (isFinanceType(oldType) && oldAmount > 0) {
           const akunLama = oldSumber
-            ? await Saldo.findOne({ akunId: oldSumber, ...cabangQ }).session(session)
-            : await Saldo.findOne({ akunId: { $regex: '^tunai' }, ...cabangQ }).session(session);
+            ? await Saldo.findOne({ akunId: oldSumber, ...cabangQ }, proj).session(session)
+            : await Saldo.findOne({ akunId: { $regex: '^tunai' }, ...cabangQ }, proj).session(session);
           if (akunLama) {
             const sb = akunLama.saldo;
-            akunLama.saldo += oldType === 'pemasukan' ? -oldAmount : oldAmount;
-            akunLama.mutasi.push({
-              type: oldType === 'pemasukan' ? 'keluar' : 'masuk',
-              amount: oldAmount,
-              keterangan: `Edit Keuangan - Koreksi ${oldType} lama: ${oldRecord.description || oldRecord.category || '-'}`,
-              saldoBefore: sb, saldoAfter: akunLama.saldo, createdBy: req.user?._id
-            });
-            await akunLama.save({ validateBeforeSave: false, session });
+            const newSaldo = sb + (oldType === 'pemasukan' ? -oldAmount : oldAmount);
+            await Saldo.updateOne(
+              { _id: akunLama._id },
+              {
+                $set: { saldo: newSaldo },
+                $push: {
+                  mutasi: {
+                    type: oldType === 'pemasukan' ? 'keluar' : 'masuk',
+                    amount: oldAmount,
+                    keterangan: `Edit Keuangan - Koreksi ${oldType} lama: ${oldRecord.description || oldRecord.category || '-'}`,
+                    saldoBefore: sb, saldoAfter: newSaldo, createdBy: req.user?._id
+                  }
+                }
+              },
+              { session }
+            );
           }
         }
         // Terapkan efek saldo BARU
         if (isFinanceType(newType) && newAmount > 0) {
           const akunBaru = newSumber
-            ? await Saldo.findOne({ akunId: newSumber, ...cabangQ }).session(session)
-            : await Saldo.findOne({ akunId: { $regex: '^tunai' }, ...cabangQ }).session(session);
+            ? await Saldo.findOne({ akunId: newSumber, ...cabangQ }, proj).session(session)
+            : await Saldo.findOne({ akunId: { $regex: '^tunai' }, ...cabangQ }, proj).session(session);
           if (akunBaru) {
             const sb = akunBaru.saldo;
-            akunBaru.saldo += newType === 'pemasukan' ? newAmount : -newAmount;
-            akunBaru.mutasi.push({
-              type: newType === 'pemasukan' ? 'masuk' : 'keluar',
-              amount: newAmount,
-              keterangan: `Edit Keuangan - ${newType === 'pemasukan' ? 'Pemasukan' : 'Pengeluaran'} baru: ${newData.description || newData.category || '-'}`,
-              saldoBefore: sb, saldoAfter: akunBaru.saldo, createdBy: req.user?._id
-            });
-            await akunBaru.save({ validateBeforeSave: false, session });
+            const newSaldo = sb + (newType === 'pemasukan' ? newAmount : -newAmount);
+            await Saldo.updateOne(
+              { _id: akunBaru._id },
+              {
+                $set: { saldo: newSaldo },
+                $push: {
+                  mutasi: {
+                    type: newType === 'pemasukan' ? 'masuk' : 'keluar',
+                    amount: newAmount,
+                    keterangan: `Edit Keuangan - ${newType === 'pemasukan' ? 'Pemasukan' : 'Pengeluaran'} baru: ${newData.description || newData.category || '-'}`,
+                    saldoBefore: sb, saldoAfter: newSaldo, createdBy: req.user?._id
+                  }
+                }
+              },
+              { session }
+            );
           }
         }
       }
@@ -323,9 +348,11 @@ exports.updateFinance = async (req, res) => {
           throw { status: 400, message: 'Akun tujuan wajib dipilih untuk pembayaran transfer/QRIS' };
         }
 
+        // Projection: _id, saldo, akunId, namaAkun (namaAkun & akunId dipakai di bawah untuk record.sumberDana).
+        const proj2 = { _id: 1, saldo: 1, akunId: 1, namaAkun: 1 };
         const akun = metode === 'cash'
-          ? await Saldo.findOne({ akunId: { $regex: '^tunai' }, ...cabangQ }).session(session)
-          : await Saldo.findOne({ akunId, ...cabangQ }).session(session);
+          ? await Saldo.findOne({ akunId: { $regex: '^tunai' }, ...cabangQ }, proj2).session(session)
+          : await Saldo.findOne({ akunId, ...cabangQ }, proj2).session(session);
         if (!akun) {
           throw { status: 400, message: metode === 'cash' ? 'Akun Kas Tunai tidak ditemukan' : 'Akun tujuan tidak ditemukan' };
         }
@@ -335,14 +362,22 @@ exports.updateFinance = async (req, res) => {
         const isPiutang = oldType === 'piutang';
         const label = metode === 'cash' ? 'Tunai' : metode === 'qris' ? 'QRIS' : 'Transfer';
         const sb = akun.saldo;
-        akun.saldo += isPiutang ? newAmount : -newAmount;
-        akun.mutasi.push({
-          type: isPiutang ? 'masuk' : 'keluar',
-          amount: newAmount,
-          keterangan: `Lunasi ${oldType} (${label}): ${newData.description || oldRecord.description || oldRecord.category || '-'}`,
-          saldoBefore: sb, saldoAfter: akun.saldo, createdBy: req.user?._id
-        });
-        await akun.save({ validateBeforeSave: false, session });
+        const newSaldo = sb + (isPiutang ? newAmount : -newAmount);
+        await Saldo.updateOne(
+          { _id: akun._id },
+          {
+            $set: { saldo: newSaldo },
+            $push: {
+              mutasi: {
+                type: isPiutang ? 'masuk' : 'keluar',
+                amount: newAmount,
+                keterangan: `Lunasi ${oldType} (${label}): ${newData.description || oldRecord.description || oldRecord.category || '-'}`,
+                saldoBefore: sb, saldoAfter: newSaldo, createdBy: req.user?._id
+              }
+            }
+          },
+          { session }
+        );
 
         // Simpan info akun ke record supaya delete bisa rollback akurat
         newData.sumberDana     = akun.akunId;
@@ -357,22 +392,30 @@ exports.updateFinance = async (req, res) => {
       if (isHutangPiutang(oldType) && oldType === newType && oldIsPaid && newIsPaid && newAmount !== oldAmount) {
         const diff = newAmount - oldAmount;
         const akun = oldSumber
-          ? await Saldo.findOne({ akunId: oldSumber, ...cabangQ }).session(session)
-          : await Saldo.findOne({ akunId: { $regex: '^tunai' }, ...cabangQ }).session(session);
+          ? await Saldo.findOne({ akunId: oldSumber, ...cabangQ }, proj).session(session)
+          : await Saldo.findOne({ akunId: { $regex: '^tunai' }, ...cabangQ }, proj).session(session);
         if (akun) {
           // piutang: nominal naik → saldo naik (delta = +diff)
           // hutang:  nominal naik → saldo turun (delta = -diff)
           const isPiutang = oldType === 'piutang';
           const delta = isPiutang ? diff : -diff;
           const sb = akun.saldo;
-          akun.saldo += delta;
-          akun.mutasi.push({
-            type: delta > 0 ? 'masuk' : 'keluar',
-            amount: Math.abs(diff),
-            keterangan: `Koreksi nominal ${oldType} (${oldAmount} → ${newAmount}): ${newData.description || oldRecord.description || oldRecord.category || '-'}`,
-            saldoBefore: sb, saldoAfter: akun.saldo, createdBy: req.user?._id
-          });
-          await akun.save({ validateBeforeSave: false, session });
+          const newSaldo = sb + delta;
+          await Saldo.updateOne(
+            { _id: akun._id },
+            {
+              $set: { saldo: newSaldo },
+              $push: {
+                mutasi: {
+                  type: delta > 0 ? 'masuk' : 'keluar',
+                  amount: Math.abs(diff),
+                  keterangan: `Koreksi nominal ${oldType} (${oldAmount} → ${newAmount}): ${newData.description || oldRecord.description || oldRecord.category || '-'}`,
+                  saldoBefore: sb, saldoAfter: newSaldo, createdBy: req.user?._id
+                }
+              }
+            },
+            { session }
+          );
         }
       }
 
@@ -404,40 +447,59 @@ exports.deleteFinance = async (req, res) => {
 
       const amount = parseFloat(record.amount) || 0;
       const sumberDana = record.sumberDana || '';
+      // Projection minimal — hanya butuh _id + saldo untuk update; hindari load mutasi.
+      const proj = { _id: 1, saldo: 1 };
       const akun = amount > 0
         ? (sumberDana
-            ? await Saldo.findOne({ akunId: sumberDana, ...cabangQ }).session(session)
-            : await Saldo.findOne({ akunId: { $regex: '^tunai' }, ...cabangQ }).session(session))
+            ? await Saldo.findOne({ akunId: sumberDana, ...cabangQ }, proj).session(session)
+            : await Saldo.findOne({ akunId: { $regex: '^tunai' }, ...cabangQ }, proj).session(session))
         : null;
 
       // (1) Rollback pemasukan/pengeluaran (perilaku existing)
       if ((record.type === 'pemasukan' || record.type === 'pengeluaran') && amount > 0 && akun) {
         const isIncome = record.type === 'pemasukan';
         const saldoBefore = akun.saldo;
-        akun.saldo += isIncome ? -amount : amount;
-        akun.mutasi.push({
-          type: isIncome ? 'keluar' : 'masuk',
-          amount,
-          keterangan: `Hapus ${isIncome ? 'Pemasukan' : 'Pengeluaran'}: ${record.description || record.category || '-'}`,
-          saldoBefore, saldoAfter: akun.saldo, createdBy: req.user?._id
-        });
-        await akun.save({ validateBeforeSave: false, session });
+        const newSaldo = saldoBefore + (isIncome ? -amount : amount);
+        await Saldo.updateOne(
+          { _id: akun._id },
+          {
+            $set: { saldo: newSaldo },
+            $push: {
+              mutasi: {
+                type: isIncome ? 'keluar' : 'masuk',
+                amount,
+                keterangan: `Hapus ${isIncome ? 'Pemasukan' : 'Pengeluaran'}: ${record.description || record.category || '-'}`,
+                saldoBefore, saldoAfter: newSaldo, createdBy: req.user?._id
+              }
+            }
+          },
+          { session }
+        );
       }
 
       // (2) Rollback hutang/piutang yang sudah lunas
       // piutang lunas sebelumnya menambah saldo → sekarang kurangi
       // hutang  lunas sebelumnya mengurangi saldo → sekarang tambah kembali
+      // (blok (1) & (2) mutually exclusive per record.type — snapshot saldo aman)
       if ((record.type === 'hutang' || record.type === 'piutang') && record.isPaid === true && amount > 0 && akun) {
         const isPiutang = record.type === 'piutang';
         const saldoBefore = akun.saldo;
-        akun.saldo += isPiutang ? -amount : amount;
-        akun.mutasi.push({
-          type: isPiutang ? 'keluar' : 'masuk',
-          amount,
-          keterangan: `Hapus ${record.type} lunas: ${record.description || record.category || '-'}`,
-          saldoBefore, saldoAfter: akun.saldo, createdBy: req.user?._id
-        });
-        await akun.save({ validateBeforeSave: false, session });
+        const newSaldo = saldoBefore + (isPiutang ? -amount : amount);
+        await Saldo.updateOne(
+          { _id: akun._id },
+          {
+            $set: { saldo: newSaldo },
+            $push: {
+              mutasi: {
+                type: isPiutang ? 'keluar' : 'masuk',
+                amount,
+                keterangan: `Hapus ${record.type} lunas: ${record.description || record.category || '-'}`,
+                saldoBefore, saldoAfter: newSaldo, createdBy: req.user?._id
+              }
+            }
+          },
+          { session }
+        );
       }
 
       await Finance.findByIdAndDelete(req.params.id, { session });
@@ -1169,9 +1231,11 @@ exports.exportPDF = async (req, res) => {
 };
 
 // ─── Helper: get atau buat akun brankas per cabang ───────────────────────
-const getBrankasAkun = async (cabangFilter, cabangId) => {
+const getBrankasAkun = async (cabangFilter, cabangId, projection = null) => {
   const Saldo = require('../models/Saldo');
-  let akun = await Saldo.findOne({ akunId: 'brankas', ...cabangFilter });
+  // Projection minimal (mis. { _id: 1, saldo: 1 }) untuk hindari load mutasi array besar.
+  const q = Saldo.findOne({ akunId: 'brankas', ...cabangFilter });
+  let akun = await (projection ? q.select(projection) : q);
   if (!akun && cabangId) {
     akun = await Saldo.create({
       akunId: 'brankas', namaAkun: 'Brankas', group: 'Tunai',
@@ -1205,18 +1269,25 @@ exports.updateBrankas = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Nominal tidak valid' });
     const cabangFilter = req.cabangFilter || {};
     const cabangId = req.user.cabang?._id || req.user.cabang || null;
-    const akun = await getBrankasAkun(cabangFilter, cabangId);
+    const Saldo = require('../models/Saldo');
+    const akun = await getBrankasAkun(cabangFilter, cabangId, { _id: 1, saldo: 1 });
     if (!akun) return res.status(404).json({ success: false, message: 'Akun brankas tidak ditemukan' });
     const saldoBefore = akun.saldo;
-    akun.saldo = brankasAmount;
-    akun.mutasi.push({
-      type: brankasAmount >= saldoBefore ? 'masuk' : 'keluar',
-      keterangan: 'Update Saldo Brankas Manual',
-      nominal: Math.abs(brankasAmount - saldoBefore),
-      saldoBefore, saldoAfter: brankasAmount, createdAt: new Date()
-    });
-    await akun.save({ validateBeforeSave: false });
-    res.json({ success: true, data: { brankasAmount: akun.saldo } });
+    await Saldo.updateOne(
+      { _id: akun._id },
+      {
+        $set: { saldo: brankasAmount },
+        $push: {
+          mutasi: {
+            type: brankasAmount >= saldoBefore ? 'masuk' : 'keluar',
+            keterangan: 'Update Saldo Brankas Manual',
+            nominal: Math.abs(brankasAmount - saldoBefore),
+            saldoBefore, saldoAfter: brankasAmount, createdAt: new Date()
+          }
+        }
+      }
+    );
+    res.json({ success: true, data: { brankasAmount } });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
 
@@ -1230,27 +1301,45 @@ exports.transferBrankas = async (req, res) => {
     const cabangFilter = req.user.role === 'superadmin' ? {} : { cabang: req.user.cabang?._id || req.user.cabang };
     const cabangId = req.user.cabang?._id || req.user.cabang || null;
 
-    const brankas = await getBrankasAkun(cabangFilter, cabangId);
+    const Saldo = require('../models/Saldo');
+    const brankas = await getBrankasAkun(cabangFilter, cabangId, { _id: 1, saldo: 1 });
     if (!brankas) return res.status(404).json({ success: false, message: 'Akun brankas tidak ditemukan' });
     if (nominal > brankas.saldo) return res.status(400).json({ success: false, message: `Saldo brankas tidak cukup. Saldo: Rp ${brankas.saldo.toLocaleString('id-ID')}` });
 
     // Kurangi brankas
     const brankasSebelum = brankas.saldo;
-    brankas.saldo -= nominal;
-    brankas.mutasi.push({ type: 'keluar', keterangan: keterangan || 'Transfer ke Kas Tunai', nominal, saldoBefore: brankasSebelum, saldoAfter: brankas.saldo, createdAt: new Date() });
-    await brankas.save({ validateBeforeSave: false });
+    const brankasSesudah = brankasSebelum - nominal;
+    await Saldo.updateOne(
+      { _id: brankas._id },
+      {
+        $set: { saldo: brankasSesudah },
+        $push: {
+          mutasi: { type: 'keluar', keterangan: keterangan || 'Transfer ke Kas Tunai', nominal, saldoBefore: brankasSebelum, saldoAfter: brankasSesudah, createdAt: new Date() }
+        }
+      }
+    );
 
     // Tambah ke kas tunai per cabang
-    const Saldo = require('../models/Saldo');
-    const kasTunai = await Saldo.findOne({ akunId: { $regex: '^tunai' }, ...cabangFilter });
+    const kasTunai = await Saldo.findOne(
+      { akunId: { $regex: '^tunai' }, ...cabangFilter },
+      { _id: 1, saldo: 1 }
+    );
+    let kasTunaiSesudah = null;
     if (kasTunai) {
       const sb = kasTunai.saldo;
-      kasTunai.saldo += nominal;
-      kasTunai.mutasi.push({ type: 'masuk', keterangan: keterangan || 'Transfer dari Brankas', nominal, saldoBefore: sb, saldoAfter: kasTunai.saldo, createdAt: new Date() });
-      await kasTunai.save({ validateBeforeSave: false });
+      kasTunaiSesudah = sb + nominal;
+      await Saldo.updateOne(
+        { _id: kasTunai._id },
+        {
+          $set: { saldo: kasTunaiSesudah },
+          $push: {
+            mutasi: { type: 'masuk', keterangan: keterangan || 'Transfer dari Brankas', nominal, saldoBefore: sb, saldoAfter: kasTunaiSesudah, createdAt: new Date() }
+          }
+        }
+      );
     }
 
-    res.json({ success: true, data: { brankasAmount: brankas.saldo, kasTunai: kasTunai?.saldo }, message: `Rp ${nominal.toLocaleString('id-ID')} berhasil dipindahkan ke Kas Tunai` });
+    res.json({ success: true, data: { brankasAmount: brankasSesudah, kasTunai: kasTunaiSesudah }, message: `Rp ${nominal.toLocaleString('id-ID')} berhasil dipindahkan ke Kas Tunai` });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
 exports.getModalSummary = async (req, res) => {

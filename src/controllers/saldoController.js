@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const Saldo = require('../models/Saldo');
 
 const DEFAULT_AKUN = [
@@ -79,26 +80,34 @@ exports.topUpSaldo = async (req, res) => {
     if (!amount || amount === 0) return res.status(400).json({ success: false, message: 'Nominal tidak valid' });
 
     const cabangQ = req.cabangFilter || {};
-    const akun = await Saldo.findOne({ akunId, ...cabangQ });
+    // Hindari load mutasi array besar — response tetap perlu field lain, jadi pakai select('-mutasi').
+    const akun = await Saldo.findOne({ akunId, ...cabangQ }).select('-mutasi');
     if (!akun) return res.status(404).json({ success: false, message: 'Akun tidak ditemukan' });
 
     const nominal = Number(amount);
     const saldoBefore = akun.saldo;
-    akun.saldo += nominal; // bisa + atau -
+    const newSaldo = saldoBefore + nominal; // bisa + atau -
 
-    akun.mutasi.push({
-      type: nominal >= 0 ? 'masuk' : 'keluar',
-      amount: Math.abs(nominal),
-      keterangan: keterangan || (nominal >= 0 ? 'Top Up Saldo' : 'Pengurangan Saldo'),
-      saldoBefore,
-      saldoAfter: akun.saldo,
-      createdBy: req.user?._id
-    });
-
-    await akun.save({ validateBeforeSave: false });
+    await Saldo.updateOne(
+      { _id: akun._id },
+      {
+        $set: { saldo: newSaldo },
+        $push: {
+          mutasi: {
+            type: nominal >= 0 ? 'masuk' : 'keluar',
+            amount: Math.abs(nominal),
+            keterangan: keterangan || (nominal >= 0 ? 'Top Up Saldo' : 'Pengurangan Saldo'),
+            saldoBefore,
+            saldoAfter: newSaldo,
+            createdBy: req.user?._id
+          }
+        }
+      }
+    );
+    akun.saldo = newSaldo; // sinkron ke doc lokal untuk response
 
     const io = req.app.get('io');
-    io?.emit('saldoUpdated', { akunId, saldo: akun.saldo });
+    io?.emit('saldoUpdated', { akunId, saldo: newSaldo });
 
     res.json({ success: true, data: akun, message: 'Saldo berhasil diupdate' });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
@@ -106,39 +115,67 @@ exports.topUpSaldo = async (req, res) => {
 
 // POST transfer antar akun
 exports.transferSaldo = async (req, res) => {
+  const { fromAkunId, toAkunId, amount, keterangan, biayaTransfer } = req.body;
+  if (!amount || amount <= 0) return res.status(400).json({ success: false, message: 'Nominal tidak valid' });
+  if (fromAkunId === toAkunId) return res.status(400).json({ success: false, message: 'Akun asal & tujuan tidak boleh sama' });
+
+  const cabangQ = req.cabangFilter || {};
+  const session = await mongoose.startSession();
+  let fromNama, toNama;
   try {
-    const { fromAkunId, toAkunId, amount, keterangan, biayaTransfer } = req.body;
-    if (!amount || amount <= 0) return res.status(400).json({ success: false, message: 'Nominal tidak valid' });
-    if (fromAkunId === toAkunId) return res.status(400).json({ success: false, message: 'Akun asal & tujuan tidak boleh sama' });
+    await session.withTransaction(async () => {
+      // Hindari load mutasi array; namaAkun tetap dibutuhkan untuk pesan & response.
+      const fromAkun = await Saldo.findOne({ akunId: fromAkunId, ...cabangQ }).select('-mutasi').session(session);
+      const toAkun   = await Saldo.findOne({ akunId: toAkunId, ...cabangQ }).select('-mutasi').session(session);
+      if (!fromAkun || !toAkun) throw { status: 404, message: 'Akun tidak ditemukan' };
 
-    const cabangQ = req.cabangFilter || {};
-    const fromAkun = await Saldo.findOne({ akunId: fromAkunId, ...cabangQ });
-    const toAkun = await Saldo.findOne({ akunId: toAkunId, ...cabangQ });
-    if (!fromAkun || !toAkun) return res.status(404).json({ success: false, message: 'Akun tidak ditemukan' });
+      const totalKeluar = Number(amount) + (Number(biayaTransfer) || 0);
+      if (fromAkun.saldo < totalKeluar) throw { status: 400, message: `Saldo ${fromAkun.namaAkun} tidak mencukupi` };
 
-    const totalKeluar = Number(amount) + (Number(biayaTransfer) || 0);
-    if (fromAkun.saldo < totalKeluar) return res.status(400).json({ success: false, message: `Saldo ${fromAkun.namaAkun} tidak mencukupi` });
+      const ket = keterangan || `Transfer ke ${toAkun.namaAkun}`;
 
-    const ket = keterangan || `Transfer ke ${toAkun.namaAkun}`;
+      // Kurangi saldo asal
+      const fromBefore = fromAkun.saldo;
+      const fromAfter  = fromBefore - totalKeluar;
+      await Saldo.updateOne(
+        { _id: fromAkun._id },
+        {
+          $set: { saldo: fromAfter },
+          $push: {
+            mutasi: { type: 'keluar', amount: totalKeluar, keterangan: ket, saldoBefore: fromBefore, saldoAfter: fromAfter, createdBy: req.user._id }
+          }
+        },
+        { session }
+      );
 
-    // Kurangi saldo asal
-    const fromBefore = fromAkun.saldo;
-    fromAkun.saldo -= totalKeluar;
-    fromAkun.mutasi.push({ type: 'keluar', amount: totalKeluar, keterangan: ket, saldoBefore: fromBefore, saldoAfter: fromAkun.saldo, createdBy: req.user._id });
+      // Tambah saldo tujuan
+      const toBefore = toAkun.saldo;
+      const toAfter  = toBefore + Number(amount);
+      await Saldo.updateOne(
+        { _id: toAkun._id },
+        {
+          $set: { saldo: toAfter },
+          $push: {
+            mutasi: { type: 'masuk', amount: Number(amount), keterangan: `Transfer dari ${fromAkun.namaAkun}`, saldoBefore: toBefore, saldoAfter: toAfter, createdBy: req.user._id }
+          }
+        },
+        { session }
+      );
 
-    // Tambah saldo tujuan
-    const toBefore = toAkun.saldo;
-    toAkun.saldo += Number(amount);
-    toAkun.mutasi.push({ type: 'masuk', amount: Number(amount), keterangan: `Transfer dari ${fromAkun.namaAkun}`, saldoBefore: toBefore, saldoAfter: toAkun.saldo, createdBy: req.user._id });
-
-    await fromAkun.save({ validateBeforeSave: false });
-    await toAkun.save({ validateBeforeSave: false });
+      fromNama = fromAkun.namaAkun;
+      toNama   = toAkun.namaAkun;
+    });
 
     const io = req.app.get('io');
     io?.emit('saldoUpdated');
 
-    res.json({ success: true, message: `Transfer berhasil: ${fromAkun.namaAkun} → ${toAkun.namaAkun}` });
-  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+    res.json({ success: true, message: `Transfer berhasil: ${fromNama} → ${toNama}` });
+  } catch (err) {
+    if (err && err.status) return res.status(err.status).json({ success: false, message: err.message });
+    res.status(500).json({ success: false, message: err.message });
+  } finally {
+    await session.endSession();
+  }
 };
 
 // POST koreksi saldo manual (admin)
@@ -146,19 +183,27 @@ exports.koreksiSaldo = async (req, res) => {
   try {
     const { akunId, saldoBaru, keterangan } = req.body;
     const cabangQ = req.cabangFilter || {};
-    const akun = await Saldo.findOne({ akunId, ...cabangQ });
+    const akun = await Saldo.findOne({ akunId, ...cabangQ }).select('-mutasi');
     if (!akun) return res.status(404).json({ success: false, message: 'Akun tidak ditemukan' });
     const saldoBefore = akun.saldo;
-    const selisih = Number(saldoBaru) - saldoBefore;
-    akun.saldo = Number(saldoBaru);
-    akun.mutasi.push({
-      type: selisih >= 0 ? 'masuk' : 'keluar',
-      amount: Math.abs(selisih),
-      keterangan: keterangan || 'Koreksi Saldo Manual',
-      saldoBefore, saldoAfter: akun.saldo,
-      createdBy: req.user._id
-    });
-    await akun.save({ validateBeforeSave: false });
+    const saldoAfter  = Number(saldoBaru);
+    const selisih = saldoAfter - saldoBefore;
+    await Saldo.updateOne(
+      { _id: akun._id },
+      {
+        $set: { saldo: saldoAfter },
+        $push: {
+          mutasi: {
+            type: selisih >= 0 ? 'masuk' : 'keluar',
+            amount: Math.abs(selisih),
+            keterangan: keterangan || 'Koreksi Saldo Manual',
+            saldoBefore, saldoAfter,
+            createdBy: req.user._id
+          }
+        }
+      }
+    );
+    akun.saldo = saldoAfter; // sinkron untuk response
     res.json({ success: true, data: akun, message: 'Saldo berhasil dikoreksi' });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
@@ -166,12 +211,19 @@ exports.koreksiSaldo = async (req, res) => {
 // POST kurangi saldo (dipanggil dari transaksi)
 exports.kurangiSaldo = async (akunId, amount, keterangan, userId, refTransaksi) => {
   try {
-    const akun = await Saldo.findOne({ akunId });
+    const akun = await Saldo.findOne({ akunId }, { _id: 1, saldo: 1 });
     if (!akun) return;
     const saldoBefore = akun.saldo;
-    akun.saldo -= Number(amount);
-    akun.mutasi.push({ type: 'keluar', amount: Number(amount), keterangan, refTransaksi, saldoBefore, saldoAfter: akun.saldo, createdBy: userId });
-    await akun.save({ validateBeforeSave: false });
+    const saldoAfter  = saldoBefore - Number(amount);
+    await Saldo.updateOne(
+      { _id: akun._id },
+      {
+        $set: { saldo: saldoAfter },
+        $push: {
+          mutasi: { type: 'keluar', amount: Number(amount), keterangan, refTransaksi, saldoBefore, saldoAfter, createdBy: userId }
+        }
+      }
+    );
   } catch (err) { console.error('Error kurangi saldo:', err.message); }
 };
 

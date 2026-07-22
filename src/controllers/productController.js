@@ -14,7 +14,7 @@ exports.getProducts = async (req, res) => {
     ];
     if (lowStock === 'true') {
       const { Settings } = require('../models/index');
-      const settings = await Settings.findOne();
+      const settings = await Settings.findOne(req.cabangFilter || {});
       const minStockAlert = settings?.minStockAlert || 5;
       query.$expr = { $lte: ['$stock', { $ifNull: ['$minStock', minStockAlert] }] };
     }
@@ -191,9 +191,9 @@ exports.bulkSetPointValue = async (req, res) => {
 exports.getLowStock = async (req, res) => {
   try {
     const { Settings } = require('../models/index');
-    const settings = await Settings.findOne();
-    const lowStockThreshold = settings?.lowStockThreshold || 5;
     const cabangQ = req.cabangFilter || {};
+    const settings = await Settings.findOne(cabangQ);
+    const lowStockThreshold = settings?.lowStockThreshold || 5;
 
     const products = await Product.find({
       type: 'fisik',

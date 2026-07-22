@@ -89,9 +89,11 @@ exports.earnPointsAfterTransaction = async (customerId, transactionId, items, us
     const customer = await Customer.findById(customerId);
     if (!customer || !customer.isMember) return 0;
 
-    // Ambil settings per cabang
-    const settingsQuery = cabangFilter || {};
-    const settings = await Settings.findOne(settingsQuery) || await Settings.findOne();
+    // Ambil settings per cabang — jangan fallback ke doc arbitrary lintas cabang.
+    // Kalau cabang tidak jelas atau belum punya Settings sendiri, pakai default literal.
+    const settings = cabangFilter?.cabang
+      ? await Settings.findOne({ cabang: cabangFilter.cabang })
+      : null;
     if (settings?.pointSettings?.enabled === false) return 0;
     const perRupiah = settings?.pointSettings?.pointPerRupiah || 50;
 
@@ -139,7 +141,11 @@ exports.redeemPoints = async (req, res) => {
     if (!customer) return res.status(404).json({ success: false, message: 'Pelanggan tidak ditemukan' });
     if (!customer.isMember) return res.status(400).json({ success: false, message: 'Pelanggan bukan member' });
 
-    const settings      = await Settings.findOne();
+    // Scope ke cabang milik customer (bukan doc Settings arbitrary lintas cabang).
+    // Kalau customer tidak punya cabang / cabang belum punya Settings, pakai default literal.
+    const settings = customer.cabang
+      ? await Settings.findOne({ cabang: customer.cabang })
+      : null;
     const rupiahPerPoint = settings?.pointSettings?.rupiahPerPoint || 10;
     const minRedeem      = settings?.pointSettings?.minRedeemPoints || 100;
 

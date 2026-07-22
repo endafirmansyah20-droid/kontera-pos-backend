@@ -46,8 +46,10 @@ exports.getMemberInfo = async (req, res) => {
 
     const logs = await PointLog.find({ customer: id }).sort({ createdAt: -1 }).limit(10);
 
-    // Ambil settings per cabang
-    const settings = await Settings.findOne(member.cabang ? { cabang: member.cabang } : {}) || await Settings.findOne();
+    // Scope strict ke cabang milik member — jangan fallback ke doc arbitrary lintas cabang.
+    const settings = member.cabang
+      ? await Settings.findOne({ cabang: member.cabang })
+      : null;
     const pointSettings = settings?.pointSettings || {};
     const storeName     = settings?.storeName || 'Galaxy Cell';
 

@@ -15,18 +15,29 @@ const MAX_CABANG     = 15;
 // ── Registrasi Owner Baru ─────────────────────────────────────────
 exports.register = async (req, res) => {
   try {
-    const { name, username, password, namaToko, alamat, telepon } = req.body;
+    const { name, username, password, namaToko, alamat, telepon, email } = req.body;
 
     if (!name || !username || !password || !namaToko) {
       return res.status(400).json({ success: false, message: 'Semua field wajib diisi' });
+    }
+    if (!email) {
+      return res.status(400).json({ success: false, message: 'Email wajib diisi' });
     }
     if (password.length < 6) {
       return res.status(400).json({ success: false, message: 'Password minimal 6 karakter' });
     }
 
-    const exists = await User.findOne({ username });
+    const emailNorm = String(email).toLowerCase().trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailNorm)) {
+      return res.status(400).json({ success: false, message: 'Format email tidak valid' });
+    }
+
+    const exists = await User.findOne({ $or: [{ username }, { email: emailNorm }] });
     if (exists) {
-      return res.status(400).json({ success: false, message: 'Username sudah digunakan' });
+      if (exists.username === username) {
+        return res.status(400).json({ success: false, message: 'Username sudah dipakai' });
+      }
+      return res.status(400).json({ success: false, message: 'Email sudah terdaftar' });
     }
 
     // Buat kode cabang otomatis dari nama toko
@@ -34,7 +45,7 @@ exports.register = async (req, res) => {
 
     // Buat user owner
     const owner = await User.create({
-      name, username, password,
+      name, username, password, email: emailNorm,
       role: 'owner',
     });
 

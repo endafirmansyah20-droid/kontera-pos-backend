@@ -1,7 +1,10 @@
 const jwt = require('jsonwebtoken');
+const { OAuth2Client } = require('google-auth-library');
 const User = require('../models/User');
 
 const signToken = (id) => jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRE });
+
+const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 exports.register = async (req, res) => {
   try {
@@ -22,11 +25,65 @@ exports.login = async (req, res) => {
     const { username, password } = req.body;
     if (!username || !password) return res.status(400).json({ success: false, message: 'Username dan password wajib diisi' });
 
-    const user = await User.findOne({ username }).select('+password').populate('cabang', 'nama kode alamat');
+    const query = String(username).includes('@')
+      ? { email: String(username).toLowerCase().trim() }
+      : { username };
+
+    const user = await User.findOne(query).select('+password').populate('cabang', 'nama kode alamat');
     if (!user || !(await user.comparePassword(password))) {
       return res.status(401).json({ success: false, message: 'Username atau password salah' });
     }
     if (!user.isActive) return res.status(401).json({ success: false, message: 'Akun tidak aktif' });
+
+    user.lastLogin = new Date();
+    await user.save({ validateBeforeSave: false });
+
+    const token = signToken(user._id);
+    res.json({ success: true, token, user });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.googleLogin = async (req, res) => {
+  try {
+    const { credential } = req.body;
+    if (!credential) {
+      return res.status(400).json({ success: false, message: 'Credential Google wajib diisi' });
+    }
+
+    let payload;
+    try {
+      const ticket = await googleClient.verifyIdToken({
+        idToken: credential,
+        audience: process.env.GOOGLE_CLIENT_ID,
+      });
+      payload = ticket.getPayload();
+    } catch (err) {
+      return res.status(401).json({ success: false, message: 'Token Google tidak valid' });
+    }
+
+    if (!payload?.email) {
+      return res.status(401).json({ success: false, message: 'Token Google tidak valid' });
+    }
+
+    const user = await User.findOne({ email: payload.email.toLowerCase() })
+      .populate('cabang', 'nama kode alamat');
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'Akun dengan email ini belum terdaftar. Silakan daftar dulu.',
+      });
+    }
+
+    if (user.role !== 'owner') {
+      return res.status(401).json({ success: false, message: 'Login Google hanya untuk Owner' });
+    }
+
+    if (!user.isActive) {
+      return res.status(401).json({ success: false, message: 'Akun tidak aktif' });
+    }
 
     user.lastLogin = new Date();
     await user.save({ validateBeforeSave: false });

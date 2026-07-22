@@ -4,6 +4,15 @@ const bcrypt = require('bcryptjs');
 const userSchema = new mongoose.Schema({
   name:     { type: String, required: true, trim: true },
   username: { type: String, required: true, unique: true, trim: true },
+  email:    {
+    type: String,
+    required: false,
+    unique: true,
+    sparse: true,
+    lowercase: true,
+    trim: true,
+    match: [/^[^\s@]+@[^\s@]+\.[^\s@]+$/, 'Format email tidak valid'],
+  },
   password: { type: String, required: true, minlength: 6 },
   role:     { type: String, enum: ['superadmin', 'owner', 'admin', 'karyawan'], default: 'karyawan' },
   cabang:   { type: mongoose.Schema.Types.ObjectId, ref: 'Cabang', default: null },

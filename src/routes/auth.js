@@ -4,6 +4,7 @@ const ctrl = require('../controllers/authController');
 const { protect, adminOnly } = require('../middleware/auth');
 
 router.post('/login', ctrl.login);
+router.post('/google', ctrl.googleLogin);
 router.post('/register', ctrl.register);
 router.get('/me', protect, ctrl.getMe);
 router.get('/users', protect, adminOnly, ctrl.getUsers);

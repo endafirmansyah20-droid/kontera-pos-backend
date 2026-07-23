@@ -448,6 +448,7 @@ exports.getCabangSummary = async (req, res) => {
     const owner = req.user;
 
     const cabangs = await Cabang.find({ owner: owner._id, isActive: true });
+    const cabangIds = cabangs.map(c => c._id);
 
     const now = new Date();
     const todayStart  = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
@@ -455,38 +456,120 @@ exports.getCabangSummary = async (req, res) => {
     const weekStart   = new Date(now); weekStart.setDate(now.getDate() - 6); weekStart.setHours(0,0,0,0);
     const monthStart  = new Date(now.getFullYear(), now.getMonth(), 1);
 
-    const result = await Promise.all(cabangs.map(async c => {
-      const cabangQ = { cabang: c._id };
+    // Template 7 tanggal (YYYY-MM-DD) di WIB, urut dari 6 hari lalu → hari ini,
+    // supaya cocok dengan output $dateToString timezone Asia/Jakarta
+    const sparklineDates = [];
+    for (let i = 6; i >= 0; i--) {
+      const wib = new Date(Date.now() + 7 * 60 * 60 * 1000);
+      wib.setUTCDate(wib.getUTCDate() - i);
+      const y = wib.getUTCFullYear();
+      const m = String(wib.getUTCMonth() + 1).padStart(2, '0');
+      const d = String(wib.getUTCDate()).padStart(2, '0');
+      sparklineDates.push(`${y}-${m}-${d}`);
+    }
 
-      const [harian, mingguan, bulanan, saldos] = await Promise.all([
-        Transaction.aggregate([
-          { $match: { ...cabangQ, type: 'penjualan', isVoid: { $ne: true }, transactionDate: { $gte: todayStart, $lte: todayEnd } } },
-          { $group: { _id: null, omset: { $sum: '$total' }, laba: { $sum: '$totalProfit' }, count: { $sum: 1 } } }
-        ]),
-        Transaction.aggregate([
-          { $match: { ...cabangQ, type: 'penjualan', isVoid: { $ne: true }, transactionDate: { $gte: weekStart, $lte: todayEnd } } },
-          { $group: { _id: null, omset: { $sum: '$total' }, laba: { $sum: '$totalProfit' }, count: { $sum: 1 } } }
-        ]),
-        Transaction.aggregate([
-          { $match: { ...cabangQ, type: 'penjualan', isVoid: { $ne: true }, transactionDate: { $gte: monthStart } } },
-          { $group: { _id: null, omset: { $sum: '$total' }, laba: { $sum: '$totalProfit' }, count: { $sum: 1 } } }
-        ]),
-        Saldo.find({ ...cabangQ, isActive: true }).select('akunId saldo'),
-      ]);
+    const [perCabang, sparklineRaw] = await Promise.all([
+      Promise.all(cabangs.map(async c => {
+        const cabangQ = { cabang: c._id };
 
-      const kasTunai    = saldos.find(s => s.akunId.startsWith('tunai'))?.saldo || 0;
-      const brankas     = saldos.find(s => s.akunId === 'brankas')?.saldo || 0;
-      const saldoDigital= saldos.filter(s => !s.akunId.startsWith('tunai') && s.akunId !== 'brankas').reduce((t,s) => t + s.saldo, 0);
+        const [harian, mingguan, bulanan, saldos] = await Promise.all([
+          Transaction.aggregate([
+            { $match: { ...cabangQ, type: 'penjualan', isVoid: { $ne: true }, transactionDate: { $gte: todayStart, $lte: todayEnd } } },
+            { $group: { _id: null, omset: { $sum: '$total' }, laba: { $sum: '$totalProfit' }, count: { $sum: 1 } } }
+          ]),
+          Transaction.aggregate([
+            { $match: { ...cabangQ, type: 'penjualan', isVoid: { $ne: true }, transactionDate: { $gte: weekStart, $lte: todayEnd } } },
+            { $group: { _id: null, omset: { $sum: '$total' }, laba: { $sum: '$totalProfit' }, count: { $sum: 1 } } }
+          ]),
+          Transaction.aggregate([
+            { $match: { ...cabangQ, type: 'penjualan', isVoid: { $ne: true }, transactionDate: { $gte: monthStart } } },
+            { $group: { _id: null, omset: { $sum: '$total' }, laba: { $sum: '$totalProfit' }, count: { $sum: 1 } } }
+          ]),
+          Saldo.find({ ...cabangQ, isActive: true }).select('akunId saldo'),
+        ]);
 
-      return {
-        _id: c._id, nama: c.nama, kode: c.kode, isActive: c.isActive,
-        harian:   { omset: harian[0]?.omset||0,   laba: harian[0]?.laba||0,   count: harian[0]?.count||0   },
-        mingguan: { omset: mingguan[0]?.omset||0,  laba: mingguan[0]?.laba||0,  count: mingguan[0]?.count||0  },
-        bulanan:  { omset: bulanan[0]?.omset||0,   laba: bulanan[0]?.laba||0,   count: bulanan[0]?.count||0   },
-        kasTunai, brankas, saldoDigital,
-      };
-    }));
+        const kasTunai    = saldos.find(s => s.akunId.startsWith('tunai'))?.saldo || 0;
+        const brankas     = saldos.find(s => s.akunId === 'brankas')?.saldo || 0;
+        const saldoDigital= saldos.filter(s => !s.akunId.startsWith('tunai') && s.akunId !== 'brankas').reduce((t,s) => t + s.saldo, 0);
+
+        return {
+          _id: c._id, nama: c.nama, kode: c.kode, isActive: c.isActive,
+          harian:   { omset: harian[0]?.omset||0,   laba: harian[0]?.laba||0,   count: harian[0]?.count||0   },
+          mingguan: { omset: mingguan[0]?.omset||0,  laba: mingguan[0]?.laba||0,  count: mingguan[0]?.count||0  },
+          bulanan:  { omset: bulanan[0]?.omset||0,   laba: bulanan[0]?.laba||0,   count: bulanan[0]?.count||0   },
+          kasTunai, brankas, saldoDigital,
+        };
+      })),
+      Transaction.aggregate([
+        { $match: {
+            cabang: { $in: cabangIds },
+            type: 'penjualan',
+            isVoid: { $ne: true },
+            transactionDate: { $gte: weekStart }
+        }},
+        { $group: {
+            _id: {
+              cabang: '$cabang',
+              tanggal: { $dateToString: { format: '%Y-%m-%d', date: '$transactionDate', timezone: 'Asia/Jakarta' } }
+            },
+            omset:    { $sum: '$total' },
+            laba:     { $sum: '$totalProfit' },
+            jumlahTx: { $sum: 1 }
+        }},
+        { $sort: { '_id.tanggal': 1 } }
+      ]),
+    ]);
+
+    // Lookup { cabangId → { tanggal → row } }
+    const sparklineByCabang = new Map();
+    for (const row of sparklineRaw) {
+      const cid = String(row._id.cabang);
+      if (!sparklineByCabang.has(cid)) sparklineByCabang.set(cid, {});
+      sparklineByCabang.get(cid)[row._id.tanggal] = row;
+    }
+
+    const result = perCabang.map(c => {
+      const byDate = sparklineByCabang.get(String(c._id));
+      const sparkline = sparklineDates.map(tanggal => {
+        const row = byDate?.[tanggal];
+        return {
+          tanggal,
+          omset:    row?.omset    || 0,
+          laba:     row?.laba     || 0,
+          jumlahTx: row?.jumlahTx || 0,
+        };
+      });
+      return { ...c, sparkline };
+    });
 
     res.json({ success: true, data: result });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+};
+
+
+// ── Aktivitas Terbaru: N transaksi lintas semua cabang Owner ─────
+exports.getRecentActivity = async (req, res) => {
+  try {
+    const Transaction = require('../models/Transaction');
+    const owner = req.user;
+
+    const parsed = parseInt(req.query.limit);
+    const limit = Number.isFinite(parsed)
+      ? Math.min(Math.max(parsed, 1), 50)
+      : 10;
+
+    const cabangs = await Cabang.find({ owner: owner._id }).select('_id');
+    const cabangIds = cabangs.map(c => c._id);
+
+    const transactions = await Transaction.find({ cabang: { $in: cabangIds } })
+      .sort('-transactionDate')
+      .limit(limit)
+      .select('transactionDate total totalProfit type isVoid cashierName invoiceNumber cabang')
+      .populate('cabang', 'nama kode')
+      .lean();
+
+    res.json({ success: true, data: transactions });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
 };

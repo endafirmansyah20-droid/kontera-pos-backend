@@ -1,3 +1,4 @@
+const mongoose     = require('mongoose');
 const User         = require('../models/User');
 const Cabang       = require('../models/Cabang');
 const Subscription = require('../models/Subscription');
@@ -330,6 +331,71 @@ exports.toggleUser = async (req, res) => {
 };
 
 
+// ── Edit User (nama, role, cabang) ───────────────────────────────
+exports.editUser = async (req, res) => {
+  try {
+    const owner = req.user;
+    const { name, role, cabangId } = req.body;
+
+    const user = await User.findById(req.params.userId).populate('cabang');
+    if (!user) return res.status(404).json({ success: false, message: 'User tidak ditemukan' });
+
+    // Scope check: user harus di cabang milik owner
+    const currentCabangId = user.cabang?._id || user.cabang;
+    const currentCabang = currentCabangId
+      ? await Cabang.findOne({ _id: currentCabangId, owner: owner._id })
+      : null;
+    if (!currentCabang) return res.status(403).json({ success: false, message: 'Akses ditolak' });
+
+    if (role !== undefined && !['admin', 'karyawan'].includes(role)) {
+      return res.status(403).json({ success: false, message: 'Role hanya boleh admin atau karyawan' });
+    }
+
+    if (cabangId !== undefined && String(cabangId) !== String(currentCabangId)) {
+      const targetCabang = await Cabang.findOne({ _id: cabangId, owner: owner._id });
+      if (!targetCabang) return res.status(403).json({ success: false, message: 'Cabang tujuan bukan milik kamu' });
+      user.cabang = targetCabang._id;
+    }
+
+    if (name !== undefined) user.name = name;
+    if (role !== undefined) user.role = role;
+
+    await user.save();
+    const updated = await User.findById(user._id).populate('cabang', 'nama kode');
+    res.json({ success: true, message: 'User berhasil diupdate', data: updated });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── Reset Password User ──────────────────────────────────────────
+exports.resetUserPassword = async (req, res) => {
+  try {
+    const owner = req.user;
+    const { newPassword } = req.body;
+
+    if (!newPassword || newPassword.length < 6) {
+      return res.status(400).json({ success: false, message: 'Password baru minimal 6 karakter' });
+    }
+
+    const user = await User.findById(req.params.userId).select('+password').populate('cabang');
+    if (!user) return res.status(404).json({ success: false, message: 'User tidak ditemukan' });
+
+    const currentCabangId = user.cabang?._id || user.cabang;
+    const currentCabang = currentCabangId
+      ? await Cabang.findOne({ _id: currentCabangId, owner: owner._id })
+      : null;
+    if (!currentCabang) return res.status(403).json({ success: false, message: 'Akses ditolak' });
+
+    user.password = newPassword;
+    await user.save();
+    res.json({ success: true, message: `Password ${user.name} berhasil direset` });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+
 // ── Get Performa Karyawan milik Owner ────────────────────────────
 exports.getEmployeeStats = async (req, res) => {
   try {
@@ -340,9 +406,19 @@ exports.getEmployeeStats = async (req, res) => {
     const cabangIds = cabangs.map(c => c._id);
 
     // Filter opsional per cabang
-    const cabangFilter = req.query.cabang
-      ? { cabang: req.query.cabang }
-      : { cabang: { $in: cabangIds } };
+    let cabangFilter;
+    if (req.query.cabang) {
+      if (!mongoose.isValidObjectId(req.query.cabang)) {
+        return res.status(400).json({ success: false, message: 'Cabang tidak valid' });
+      }
+      const owned = cabangIds.some(id => id.equals(req.query.cabang));
+      if (!owned) {
+        return res.status(403).json({ success: false, message: 'Cabang bukan milik Anda' });
+      }
+      cabangFilter = { cabang: new mongoose.Types.ObjectId(req.query.cabang) };
+    } else {
+      cabangFilter = { cabang: { $in: cabangIds } };
+    }
 
     const now        = new Date();
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);

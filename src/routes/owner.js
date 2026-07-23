@@ -3,7 +3,8 @@ const router  = express.Router();
 const {
   register, getDashboard, requestTambahCabang,
   getAllSubscriptions, konfirmasiPembayaran, checkExpired,
-  getUsers, tambahUser, toggleUser, getEmployeeStats, getCabangSummary
+  getUsers, tambahUser, toggleUser, editUser, resetUserPassword,
+  getEmployeeStats, getCabangSummary
 } = require('../controllers/ownerController');
 const { protect, superAdminOnly } = require('../middleware/auth');
 
@@ -13,6 +14,8 @@ router.post('/tambah-cabang',                     protect,         requestTambah
 router.get('/users',                              protect,         getUsers);
 router.post('/users',                             protect,         tambahUser);
 router.patch('/users/:userId/toggle',             protect,         toggleUser);
+router.put('/users/:userId',                      protect,         editUser);
+router.put('/users/:userId/reset-password',       protect,         resetUserPassword);
 router.get('/employee-stats',                     protect,         getEmployeeStats);
 router.get('/cabang-summary',                     protect,         getCabangSummary);
 // ── SuperAdmin ──────────────────────────────────────────────────────────────

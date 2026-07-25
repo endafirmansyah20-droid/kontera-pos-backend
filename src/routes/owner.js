@@ -4,7 +4,8 @@ const {
   register, getDashboard, requestTambahCabang,
   getAllSubscriptions, konfirmasiPembayaran, checkExpired,
   getUsers, tambahUser, toggleUser, editUser, resetUserPassword,
-  getEmployeeStats, getCabangSummary, getRecentActivity
+  getEmployeeStats, getCabangSummary, getRecentActivity,
+  getHourlyChart, getDashboardWidgets
 } = require('../controllers/ownerController');
 const { protect, superAdminOnly } = require('../middleware/auth');
 
@@ -19,6 +20,8 @@ router.put('/users/:userId/reset-password',       protect,         resetUserPass
 router.get('/employee-stats',                     protect,         getEmployeeStats);
 router.get('/cabang-summary',                     protect,         getCabangSummary);
 router.get('/recent-activity',                    protect,         getRecentActivity);
+router.get('/hourly-chart',                       protect,         getHourlyChart);
+router.get('/dashboard-widgets',                  protect,         getDashboardWidgets);
 // ── SuperAdmin ──────────────────────────────────────────────────────────────
 router.get('/subscriptions',                      protect, superAdminOnly, getAllSubscriptions);
 router.put('/subscriptions/:subscriptionId/konfirmasi', protect, superAdminOnly, konfirmasiPembayaran);

@@ -445,6 +445,7 @@ exports.getCabangSummary = async (req, res) => {
   try {
     const Transaction = require('../models/Transaction');
     const Saldo = require('../models/Saldo');
+    const Product = require('../models/Product');
     const owner = req.user;
 
     const cabangs = await Cabang.find({ owner: owner._id, isActive: true });
@@ -472,7 +473,7 @@ exports.getCabangSummary = async (req, res) => {
       Promise.all(cabangs.map(async c => {
         const cabangQ = { cabang: c._id };
 
-        const [harian, mingguan, bulanan, saldos] = await Promise.all([
+        const [harian, mingguan, bulanan, saldos, nilaiStokRes] = await Promise.all([
           Transaction.aggregate([
             { $match: { ...cabangQ, type: 'penjualan', isVoid: { $ne: true }, transactionDate: { $gte: todayStart, $lte: todayEnd } } },
             { $group: { _id: null, omset: { $sum: '$total' }, laba: { $sum: '$totalProfit' }, count: { $sum: 1 } } }
@@ -486,18 +487,25 @@ exports.getCabangSummary = async (req, res) => {
             { $group: { _id: null, omset: { $sum: '$total' }, laba: { $sum: '$totalProfit' }, count: { $sum: 1 } } }
           ]),
           Saldo.find({ ...cabangQ, isActive: true }).select('akunId saldo'),
+          Product.aggregate([
+            { $match: { cabang: c._id, type: 'fisik', isActive: true } },
+            { $unwind: '$stockBatches' },
+            { $match: { 'stockBatches.remainingQty': { $gt: 0 } } },
+            { $group: { _id: null, nilaiStok: { $sum: { $multiply: ['$stockBatches.remainingQty', '$stockBatches.purchasePrice'] } } } }
+          ]),
         ]);
 
         const kasTunai    = saldos.find(s => s.akunId.startsWith('tunai'))?.saldo || 0;
         const brankas     = saldos.find(s => s.akunId === 'brankas')?.saldo || 0;
         const saldoDigital= saldos.filter(s => !s.akunId.startsWith('tunai') && s.akunId !== 'brankas').reduce((t,s) => t + s.saldo, 0);
+        const nilaiStok   = nilaiStokRes[0]?.nilaiStok || 0;
 
         return {
           _id: c._id, nama: c.nama, kode: c.kode, isActive: c.isActive,
           harian:   { omset: harian[0]?.omset||0,   laba: harian[0]?.laba||0,   count: harian[0]?.count||0   },
           mingguan: { omset: mingguan[0]?.omset||0,  laba: mingguan[0]?.laba||0,  count: mingguan[0]?.count||0  },
           bulanan:  { omset: bulanan[0]?.omset||0,   laba: bulanan[0]?.laba||0,   count: bulanan[0]?.count||0   },
-          kasTunai, brankas, saldoDigital,
+          kasTunai, brankas, saldoDigital, nilaiStok,
         };
       })),
       Transaction.aggregate([
@@ -528,6 +536,8 @@ exports.getCabangSummary = async (req, res) => {
       sparklineByCabang.get(cid)[row._id.tanggal] = row;
     }
 
+    const yesterdayKey = sparklineDates[sparklineDates.length - 2];
+
     const result = perCabang.map(c => {
       const byDate = sparklineByCabang.get(String(c._id));
       const sparkline = sparklineDates.map(tanggal => {
@@ -539,7 +549,13 @@ exports.getCabangSummary = async (req, res) => {
           jumlahTx: row?.jumlahTx || 0,
         };
       });
-      return { ...c, sparkline };
+      const kRow = byDate?.[yesterdayKey];
+      const kemarin = {
+        omset: kRow?.omset    || 0,
+        laba:  kRow?.laba     || 0,
+        count: kRow?.jumlahTx || 0,
+      };
+      return { ...c, kemarin, sparkline };
     });
 
     res.json({ success: true, data: result });
@@ -569,6 +585,183 @@ exports.getRecentActivity = async (req, res) => {
       .lean();
 
     res.json({ success: true, data: transactions });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+
+// ── Hourly / Daily Chart: omset+laba per jam (today) atau per tanggal (7/30 hari) ─
+exports.getHourlyChart = async (req, res) => {
+  try {
+    const Transaction = require('../models/Transaction');
+    const owner = req.user;
+
+    const range = String(req.query.range || 'today').toLowerCase();
+    const cabangs = await Cabang.find({ owner: owner._id });
+    const cabangIds = cabangs.map(c => c._id);
+
+    const now = new Date();
+
+    if (range === '7' || range === '30') {
+      const days = range === '7' ? 7 : 30;
+      const start = new Date(now); start.setDate(now.getDate() - (days - 1)); start.setHours(0,0,0,0);
+      const end   = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23,59,59,999);
+
+      // Template N tanggal (YYYY-MM-DD) WIB, urut lama → baru, cocok dgn $dateToString Asia/Jakarta
+      const labels = [];
+      for (let i = days - 1; i >= 0; i--) {
+        const wib = new Date(Date.now() + 7 * 60 * 60 * 1000);
+        wib.setUTCDate(wib.getUTCDate() - i);
+        const y = wib.getUTCFullYear();
+        const m = String(wib.getUTCMonth() + 1).padStart(2, '0');
+        const d = String(wib.getUTCDate()).padStart(2, '0');
+        labels.push(`${y}-${m}-${d}`);
+      }
+
+      const rows = await Transaction.aggregate([
+        { $match: { cabang: { $in: cabangIds }, type: 'penjualan', isVoid: { $ne: true },
+                    transactionDate: { $gte: start, $lte: end } } },
+        { $group: {
+            _id: { cabang: '$cabang',
+                   tanggal: { $dateToString: { format: '%Y-%m-%d', date: '$transactionDate', timezone: 'Asia/Jakarta' } } },
+            omset: { $sum: '$total' },
+            laba:  { $sum: '$totalProfit' }
+        } }
+      ]);
+
+      const byCabang = new Map();
+      for (const r of rows) {
+        const cid = String(r._id.cabang);
+        if (!byCabang.has(cid)) byCabang.set(cid, {});
+        byCabang.get(cid)[r._id.tanggal] = r;
+      }
+
+      const series = cabangs.map(c => {
+        const byDate = byCabang.get(String(c._id));
+        return {
+          nama: c.nama, kode: c.kode,
+          omset: labels.map(t => byDate?.[t]?.omset || 0),
+          laba:  labels.map(t => byDate?.[t]?.laba  || 0),
+        };
+      });
+
+      return res.json({ success: true, labels, series });
+    }
+
+    // Default: per jam hari ini (00:00–23:00 WIB)
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+    const todayEnd   = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+
+    const rows = await Transaction.aggregate([
+      { $match: { cabang: { $in: cabangIds }, type: 'penjualan', isVoid: { $ne: true },
+                  transactionDate: { $gte: todayStart, $lte: todayEnd } } },
+      { $group: {
+          _id: { cabang: '$cabang',
+                 jam: { $hour: { date: '$transactionDate', timezone: 'Asia/Jakarta' } } },
+          omset: { $sum: '$total' },
+          laba:  { $sum: '$totalProfit' }
+      } },
+      { $sort: { '_id.jam': 1 } }
+    ]);
+
+    const labels = Array.from({ length: 24 }, (_, i) => `${String(i).padStart(2, '0')}:00`);
+
+    const byCabang = new Map();
+    for (const r of rows) {
+      const cid = String(r._id.cabang);
+      if (!byCabang.has(cid)) byCabang.set(cid, {});
+      byCabang.get(cid)[r._id.jam] = r;
+    }
+
+    const series = cabangs.map(c => {
+      const byHour = byCabang.get(String(c._id));
+      const omset = new Array(24).fill(0);
+      const laba  = new Array(24).fill(0);
+      for (let h = 0; h < 24; h++) {
+        const row = byHour?.[h];
+        if (row) { omset[h] = row.omset; laba[h] = row.laba; }
+      }
+      return { nama: c.nama, kode: c.kode, omset, laba };
+    });
+
+    res.json({ success: true, labels, series });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+
+// ── Dashboard Widgets: produk/kategori terlaris + breakdown metode pembayaran (today) ─
+exports.getDashboardWidgets = async (req, res) => {
+  try {
+    const Transaction = require('../models/Transaction');
+    const owner = req.user;
+
+    const cabangs = await Cabang.find({ owner: owner._id });
+    const cabangIds = cabangs.map(c => c._id);
+
+    const now = new Date();
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+    const todayEnd   = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+
+    const baseMatch = {
+      cabang: { $in: cabangIds },
+      type: 'penjualan',
+      isVoid: { $ne: true },
+      transactionDate: { $gte: todayStart, $lte: todayEnd },
+    };
+
+    const topProdukPipeline = (itemType) => ([
+      { $match: baseMatch },
+      { $unwind: '$items' },
+      { $match: { 'items.type': itemType } },
+      { $group: {
+          _id: '$items.productName',
+          productCode: { $first: '$items.productCode' },
+          terjual: { $sum: { $ifNull: ['$items.quantity', 1] } },
+          omset:   { $sum: '$items.subtotal' },
+      } },
+      { $sort: { terjual: -1 } },
+      { $limit: 5 },
+    ]);
+
+    const [fisikRaw, digitalRaw, metodeRaw] = await Promise.all([
+      Transaction.aggregate(topProdukPipeline('fisik')),
+      Transaction.aggregate(topProdukPipeline('digital')),
+      Transaction.aggregate([
+        { $match: baseMatch },
+        { $group: {
+            _id: '$paymentMethod',
+            total: { $sum: '$total' },
+            count: { $sum: 1 },
+        } },
+      ]),
+    ]);
+
+    const mapProduk = (raw) => raw.map(p => ({
+      nama: p._id,
+      productCode: p.productCode || null,
+      terjual: p.terjual || 0,
+      omset:   p.omset   || 0,
+    }));
+
+    const produkFisikTerlaris   = mapProduk(fisikRaw);
+    const produkDigitalTerlaris = mapProduk(digitalRaw);
+
+    const METODE_ENUM = ['cash', 'qris', 'transfer', 'hutang'];
+    const metodeMap = new Map(metodeRaw.map(m => [m._id, m]));
+    const metodePembayaran = METODE_ENUM.map(method => {
+      const row = metodeMap.get(method);
+      return { method, total: row?.total || 0, count: row?.count || 0 };
+    });
+
+    res.json({
+      success: true,
+      produkFisikTerlaris,
+      produkDigitalTerlaris,
+      metodePembayaran,
+    });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

@@ -420,22 +420,121 @@ exports.getEmployeeStats = async (req, res) => {
       cabangFilter = { cabang: { $in: cabangIds } };
     }
 
-    const now        = new Date();
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    // Periode: today | 7 | 30 | month (default 'month' backward-compatible)
+    const range = String(req.query.range || 'month').toLowerCase();
+    const now = new Date();
+    const endDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+    let startDate;
+    if (range === 'today') {
+      startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+    } else if (range === '7' || range === '30') {
+      const days = range === '7' ? 7 : 30;
+      startDate = new Date(now); startDate.setDate(now.getDate() - (days - 1)); startDate.setHours(0, 0, 0, 0);
+    } else {
+      startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+    }
 
     const stats = await Transaction.aggregate([
-      { $match: { ...cabangFilter, type: 'penjualan', isVoid: { $ne: true }, transactionDate: { $gte: monthStart } } },
-      { $group: {
-        _id: '$cashierName',
-        totalTx:     { $sum: 1 },
-        totalOmset:  { $sum: '$total' },
-        totalLaba:   { $sum: '$totalProfit' },
-        totalItems:  { $sum: { $size: { $ifNull: ['$items', []] } } },
+      { $match: {
+          ...cabangFilter,
+          type: 'penjualan',
+          isVoid: { $ne: true },
+          transactionDate: { $gte: startDate, $lte: endDate },
+          cashier: { $ne: null }
       }},
+      { $group: {
+          _id: '$cashier',
+          cashierNameSnapshot: { $first: '$cashierName' },
+          totalTx:     { $sum: 1 },
+          totalOmset:  { $sum: '$total' },
+          totalLaba:   { $sum: '$totalProfit' },
+          totalItems:  { $sum: { $size: { $ifNull: ['$items', []] } } },
+      }},
+      { $lookup: { from: 'users', localField: '_id', foreignField: '_id', as: 'user' } },
+      { $addFields: {
+          cashierId:   '$_id',
+          cashierName: { $ifNull: [ { $arrayElemAt: ['$user.name', 0] }, '$cashierNameSnapshot' ] },
+          avgTx:       { $cond: [ { $gt: ['$totalTx', 0] }, { $divide: ['$totalOmset', '$totalTx'] }, 0 ] }
+      }},
+      { $project: { _id: 0, user: 0, cashierNameSnapshot: 0 } },
       { $sort: { totalOmset: -1 } }
     ]);
 
     res.json({ success: true, data: stats });
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+};
+
+
+// ── Riwayat Transaksi per Karyawan (Owner) ───────────────────────
+exports.getEmployeeTransactions = async (req, res) => {
+  try {
+    const Transaction = require('../models/Transaction');
+    const owner = req.user;
+
+    const { cashier, cabang, startDate, endDate } = req.query;
+    const page  = Math.max(parseInt(req.query.page)  || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 20, 1), 100);
+
+    if (!cashier || !mongoose.isValidObjectId(cashier)) {
+      return res.status(400).json({ success: false, message: 'Parameter cashier tidak valid' });
+    }
+
+    const cabangs = await Cabang.find({ owner: owner._id }).select('_id');
+    const cabangIds = cabangs.map(c => c._id);
+
+    // Filter cabang (opsional)
+    let cabangMatch;
+    if (cabang) {
+      if (!mongoose.isValidObjectId(cabang)) {
+        return res.status(400).json({ success: false, message: 'Cabang tidak valid' });
+      }
+      const owned = cabangIds.some(id => id.equals(cabang));
+      if (!owned) {
+        return res.status(403).json({ success: false, message: 'Cabang bukan milik Anda' });
+      }
+      cabangMatch = new mongoose.Types.ObjectId(cabang);
+    } else {
+      cabangMatch = { $in: cabangIds };
+    }
+
+    // Authz: cashier harus pernah bertransaksi di salah satu cabang owner
+    const cashierId = new mongoose.Types.ObjectId(cashier);
+    const hasWorked = await Transaction.exists({ cashier: cashierId, cabang: { $in: cabangIds } });
+    if (!hasWorked) {
+      return res.status(403).json({ success: false, message: 'Karyawan tidak ditemukan di cabang Anda' });
+    }
+
+    const query = { cashier: cashierId, cabang: cabangMatch };
+
+    if (startDate || endDate) {
+      query.transactionDate = {};
+      if (startDate) query.transactionDate.$gte = new Date(startDate);
+      if (endDate) {
+        const end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+        query.transactionDate.$lte = end;
+      }
+    }
+
+    const skip = (page - 1) * limit;
+    const [transactions, total] = await Promise.all([
+      Transaction.find(query)
+        .sort('-transactionDate')
+        .skip(skip)
+        .limit(limit)
+        .select('transactionDate total totalProfit invoiceNumber cabang isVoid')
+        .populate('cabang', 'nama')
+        .lean(),
+      Transaction.countDocuments(query)
+    ]);
+
+    res.json({
+      success: true,
+      data: transactions,
+      total,
+      page,
+      pages: Math.ceil(total / limit)
+    });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
 
@@ -469,11 +568,11 @@ exports.getCabangSummary = async (req, res) => {
       sparklineDates.push(`${y}-${m}-${d}`);
     }
 
-    const [perCabang, sparklineRaw] = await Promise.all([
+    const [perCabang, sparklineRaw, subs] = await Promise.all([
       Promise.all(cabangs.map(async c => {
         const cabangQ = { cabang: c._id };
 
-        const [harian, mingguan, bulanan, saldos, nilaiStokRes] = await Promise.all([
+        const [harian, mingguan, bulanan, saldos, nilaiStokRes, jumlahKaryawan] = await Promise.all([
           Transaction.aggregate([
             { $match: { ...cabangQ, type: 'penjualan', isVoid: { $ne: true }, transactionDate: { $gte: todayStart, $lte: todayEnd } } },
             { $group: { _id: null, omset: { $sum: '$total' }, laba: { $sum: '$totalProfit' }, count: { $sum: 1 } } }
@@ -493,6 +592,7 @@ exports.getCabangSummary = async (req, res) => {
             { $match: { 'stockBatches.remainingQty': { $gt: 0 } } },
             { $group: { _id: null, nilaiStok: { $sum: { $multiply: ['$stockBatches.remainingQty', '$stockBatches.purchasePrice'] } } } }
           ]),
+          User.countDocuments({ cabang: c._id, role: { $in: ['admin', 'karyawan'] }, isActive: true }),
         ]);
 
         const kasTunai    = saldos.find(s => s.akunId.startsWith('tunai'))?.saldo || 0;
@@ -502,10 +602,11 @@ exports.getCabangSummary = async (req, res) => {
 
         return {
           _id: c._id, nama: c.nama, kode: c.kode, isActive: c.isActive,
+          alamat: c.alamat, telepon: c.telepon, createdAt: c.createdAt,
           harian:   { omset: harian[0]?.omset||0,   laba: harian[0]?.laba||0,   count: harian[0]?.count||0   },
           mingguan: { omset: mingguan[0]?.omset||0,  laba: mingguan[0]?.laba||0,  count: mingguan[0]?.count||0  },
           bulanan:  { omset: bulanan[0]?.omset||0,   laba: bulanan[0]?.laba||0,   count: bulanan[0]?.count||0   },
-          kasTunai, brankas, saldoDigital, nilaiStok,
+          kasTunai, brankas, saldoDigital, nilaiStok, jumlahKaryawan,
         };
       })),
       Transaction.aggregate([
@@ -526,6 +627,7 @@ exports.getCabangSummary = async (req, res) => {
         }},
         { $sort: { '_id.tanggal': 1 } }
       ]),
+      Subscription.find({ owner: owner._id }).select('cabang status expiredAt harga').lean(),
     ]);
 
     // Lookup { cabangId → { tanggal → row } }
@@ -535,6 +637,8 @@ exports.getCabangSummary = async (req, res) => {
       if (!sparklineByCabang.has(cid)) sparklineByCabang.set(cid, {});
       sparklineByCabang.get(cid)[row._id.tanggal] = row;
     }
+
+    const subsByCabang = new Map(subs.map(s => [String(s.cabang), s]));
 
     const yesterdayKey = sparklineDates[sparklineDates.length - 2];
 
@@ -555,7 +659,19 @@ exports.getCabangSummary = async (req, res) => {
         laba:  kRow?.laba     || 0,
         count: kRow?.jumlahTx || 0,
       };
-      return { ...c, kemarin, sparkline };
+
+      const sub = subsByCabang.get(String(c._id));
+      const hariTersisa = (!sub || sub.status === 'gratis' || !sub.expiredAt)
+        ? null
+        : Math.ceil((new Date(sub.expiredAt) - now) / 86400000);
+      const subscription = sub ? {
+        status: sub.status,
+        expiredAt: sub.expiredAt,
+        harga: sub.harga,
+        hariTersisa,
+      } : null;
+
+      return { ...c, kemarin, subscription, sparkline };
     });
 
     res.json({ success: true, data: result });
@@ -591,101 +707,386 @@ exports.getRecentActivity = async (req, res) => {
 };
 
 
-// ── Hourly / Daily Chart: omset+laba per jam (today) atau per tanggal (7/30 hari) ─
-exports.getHourlyChart = async (req, res) => {
-  try {
-    const Transaction = require('../models/Transaction');
-    const owner = req.user;
+// Helper: bangun trend chart per-jam (today) atau per-tanggal (7/30 hari)
+// Dipakai getHourlyChart & getPenjualanAnalytics. Timezone Asia/Jakarta.
+async function buildTrendData({ cabangs, cabangIds, range }) {
+  const Transaction = require('../models/Transaction');
+  const now = new Date();
 
-    const range = String(req.query.range || 'today').toLowerCase();
-    const cabangs = await Cabang.find({ owner: owner._id });
-    const cabangIds = cabangs.map(c => c._id);
+  if (range === '7' || range === '30') {
+    const days = range === '7' ? 7 : 30;
+    const start = new Date(now); start.setDate(now.getDate() - (days - 1)); start.setHours(0,0,0,0);
+    const end   = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23,59,59,999);
 
-    const now = new Date();
-
-    if (range === '7' || range === '30') {
-      const days = range === '7' ? 7 : 30;
-      const start = new Date(now); start.setDate(now.getDate() - (days - 1)); start.setHours(0,0,0,0);
-      const end   = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23,59,59,999);
-
-      // Template N tanggal (YYYY-MM-DD) WIB, urut lama → baru, cocok dgn $dateToString Asia/Jakarta
-      const labels = [];
-      for (let i = days - 1; i >= 0; i--) {
-        const wib = new Date(Date.now() + 7 * 60 * 60 * 1000);
-        wib.setUTCDate(wib.getUTCDate() - i);
-        const y = wib.getUTCFullYear();
-        const m = String(wib.getUTCMonth() + 1).padStart(2, '0');
-        const d = String(wib.getUTCDate()).padStart(2, '0');
-        labels.push(`${y}-${m}-${d}`);
-      }
-
-      const rows = await Transaction.aggregate([
-        { $match: { cabang: { $in: cabangIds }, type: 'penjualan', isVoid: { $ne: true },
-                    transactionDate: { $gte: start, $lte: end } } },
-        { $group: {
-            _id: { cabang: '$cabang',
-                   tanggal: { $dateToString: { format: '%Y-%m-%d', date: '$transactionDate', timezone: 'Asia/Jakarta' } } },
-            omset: { $sum: '$total' },
-            laba:  { $sum: '$totalProfit' }
-        } }
-      ]);
-
-      const byCabang = new Map();
-      for (const r of rows) {
-        const cid = String(r._id.cabang);
-        if (!byCabang.has(cid)) byCabang.set(cid, {});
-        byCabang.get(cid)[r._id.tanggal] = r;
-      }
-
-      const series = cabangs.map(c => {
-        const byDate = byCabang.get(String(c._id));
-        return {
-          nama: c.nama, kode: c.kode,
-          omset: labels.map(t => byDate?.[t]?.omset || 0),
-          laba:  labels.map(t => byDate?.[t]?.laba  || 0),
-        };
-      });
-
-      return res.json({ success: true, labels, series });
+    // Template N tanggal (YYYY-MM-DD) WIB, urut lama → baru, cocok dgn $dateToString Asia/Jakarta
+    const labels = [];
+    for (let i = days - 1; i >= 0; i--) {
+      const wib = new Date(Date.now() + 7 * 60 * 60 * 1000);
+      wib.setUTCDate(wib.getUTCDate() - i);
+      const y = wib.getUTCFullYear();
+      const m = String(wib.getUTCMonth() + 1).padStart(2, '0');
+      const d = String(wib.getUTCDate()).padStart(2, '0');
+      labels.push(`${y}-${m}-${d}`);
     }
-
-    // Default: per jam hari ini (00:00–23:00 WIB)
-    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
-    const todayEnd   = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
 
     const rows = await Transaction.aggregate([
       { $match: { cabang: { $in: cabangIds }, type: 'penjualan', isVoid: { $ne: true },
-                  transactionDate: { $gte: todayStart, $lte: todayEnd } } },
+                  transactionDate: { $gte: start, $lte: end } } },
       { $group: {
           _id: { cabang: '$cabang',
-                 jam: { $hour: { date: '$transactionDate', timezone: 'Asia/Jakarta' } } },
+                 tanggal: { $dateToString: { format: '%Y-%m-%d', date: '$transactionDate', timezone: 'Asia/Jakarta' } } },
           omset: { $sum: '$total' },
           laba:  { $sum: '$totalProfit' }
-      } },
-      { $sort: { '_id.jam': 1 } }
+      } }
     ]);
-
-    const labels = Array.from({ length: 24 }, (_, i) => `${String(i).padStart(2, '0')}:00`);
 
     const byCabang = new Map();
     for (const r of rows) {
       const cid = String(r._id.cabang);
       if (!byCabang.has(cid)) byCabang.set(cid, {});
-      byCabang.get(cid)[r._id.jam] = r;
+      byCabang.get(cid)[r._id.tanggal] = r;
     }
 
     const series = cabangs.map(c => {
-      const byHour = byCabang.get(String(c._id));
-      const omset = new Array(24).fill(0);
-      const laba  = new Array(24).fill(0);
-      for (let h = 0; h < 24; h++) {
-        const row = byHour?.[h];
-        if (row) { omset[h] = row.omset; laba[h] = row.laba; }
-      }
-      return { nama: c.nama, kode: c.kode, omset, laba };
+      const byDate = byCabang.get(String(c._id));
+      return {
+        nama: c.nama, kode: c.kode,
+        omset: labels.map(t => byDate?.[t]?.omset || 0),
+        laba:  labels.map(t => byDate?.[t]?.laba  || 0),
+      };
     });
 
+    return { labels, series };
+  }
+
+  // Default: per jam hari ini (00:00–23:00 WIB)
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+  const todayEnd   = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+
+  const rows = await Transaction.aggregate([
+    { $match: { cabang: { $in: cabangIds }, type: 'penjualan', isVoid: { $ne: true },
+                transactionDate: { $gte: todayStart, $lte: todayEnd } } },
+    { $group: {
+        _id: { cabang: '$cabang',
+               jam: { $hour: { date: '$transactionDate', timezone: 'Asia/Jakarta' } } },
+        omset: { $sum: '$total' },
+        laba:  { $sum: '$totalProfit' }
+    } },
+    { $sort: { '_id.jam': 1 } }
+  ]);
+
+  const labels = Array.from({ length: 24 }, (_, i) => `${String(i).padStart(2, '0')}:00`);
+
+  const byCabang = new Map();
+  for (const r of rows) {
+    const cid = String(r._id.cabang);
+    if (!byCabang.has(cid)) byCabang.set(cid, {});
+    byCabang.get(cid)[r._id.jam] = r;
+  }
+
+  const series = cabangs.map(c => {
+    const byHour = byCabang.get(String(c._id));
+    const omset = new Array(24).fill(0);
+    const laba  = new Array(24).fill(0);
+    for (let h = 0; h < 24; h++) {
+      const row = byHour?.[h];
+      if (row) { omset[h] = row.omset; laba[h] = row.laba; }
+    }
+    return { nama: c.nama, kode: c.kode, omset, laba };
+  });
+
+  return { labels, series };
+}
+
+
+// ── Hourly / Daily Chart: omset+laba per jam (today) atau per tanggal (7/30 hari) ─
+exports.getHourlyChart = async (req, res) => {
+  try {
+    const owner = req.user;
+    const range = String(req.query.range || 'today').toLowerCase();
+    const cabangs = await Cabang.find({ owner: owner._id });
+    const cabangIds = cabangs.map(c => c._id);
+    const { labels, series } = await buildTrendData({ cabangs, cabangIds, range });
     res.json({ success: true, labels, series });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+
+// ── Analytics Halaman Penjualan Owner ─────────────────────────────
+// Bundle: breakdown produk/kategori, trend harian, compare periode,
+// peak hours, metode pembayaran per cabang, ringkasan void.
+// - breakdown/trendHarian/metodePembayaran/voidSummary ikut ?range
+// - comparePeriode & peakHours window FIXED (independent dari ?range)
+exports.getPenjualanAnalytics = async (req, res) => {
+  try {
+    const Transaction = require('../models/Transaction');
+    const owner = req.user;
+
+    // Range
+    const range = String(req.query.range || '7').toLowerCase();
+    if (!['today', '7', '30'].includes(range)) {
+      return res.status(400).json({ success: false, message: 'Range tidak valid (today|7|30)' });
+    }
+
+    // Cabang authz
+    const allCabangs = await Cabang.find({ owner: owner._id });
+    let scopedCabangs, scopedCabangIds, cabangParamId = null;
+    if (req.query.cabang) {
+      if (!mongoose.isValidObjectId(req.query.cabang)) {
+        return res.status(400).json({ success: false, message: 'Cabang tidak valid' });
+      }
+      const found = allCabangs.find(c => c._id.equals(req.query.cabang));
+      if (!found) {
+        return res.status(403).json({ success: false, message: 'Cabang bukan milik Anda' });
+      }
+      scopedCabangs = [found];
+      scopedCabangIds = [found._id];
+      cabangParamId = String(found._id);
+    } else {
+      scopedCabangs = allCabangs;
+      scopedCabangIds = allCabangs.map(c => c._id);
+    }
+
+    const now = new Date();
+    const dayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+
+    // Window ikut ?range
+    let startDate;
+    if (range === 'today') {
+      startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+    } else {
+      const days = range === '7' ? 7 : 30;
+      startDate = new Date(now); startDate.setDate(now.getDate() - (days - 1)); startDate.setHours(0, 0, 0, 0);
+    }
+    const endDate = dayEnd;
+
+    // Window FIXED: minggu ini (7 hari terakhir, konsisten dgn sparkline getCabangSummary)
+    const thisWeekStart = new Date(now); thisWeekStart.setDate(now.getDate() - 6); thisWeekStart.setHours(0, 0, 0, 0);
+    const thisWeekEnd   = dayEnd;
+    const lastWeekEnd   = new Date(thisWeekStart.getTime() - 1);
+    const lastWeekStart = new Date(thisWeekStart); lastWeekStart.setDate(thisWeekStart.getDate() - 7);
+
+    // Window FIXED: peak hours 30 hari
+    const peakWindowDays = 30;
+    const peakStart = new Date(now); peakStart.setDate(now.getDate() - (peakWindowDays - 1)); peakStart.setHours(0, 0, 0, 0);
+    const peakEnd   = dayEnd;
+
+    // Match dasar
+    const rangeMatch = {
+      cabang: { $in: scopedCabangIds },
+      type: 'penjualan',
+      isVoid: { $ne: true },
+      transactionDate: { $gte: startDate, $lte: endDate }
+    };
+    const voidMatch = {
+      cabang: { $in: scopedCabangIds },
+      isVoid: true,
+      transactionDate: { $gte: startDate, $lte: endDate }
+    };
+
+    // Pipeline builders
+    const topProdukPipeline = (itemType) => ([
+      { $match: rangeMatch },
+      { $unwind: '$items' },
+      { $match: { 'items.type': itemType } },
+      { $group: {
+          _id: '$items.productName',
+          productCode: { $first: '$items.productCode' },
+          terjual: { $sum: { $ifNull: ['$items.quantity', 1] } },
+          omset:   { $sum: '$items.subtotal' },
+      } },
+      { $sort: { terjual: -1 } },
+      { $limit: 5 },
+    ]);
+    const topKategoriPipeline = [
+      { $match: rangeMatch },
+      { $unwind: '$items' },
+      { $match: { 'items.category': { $nin: [null, ''] } } },
+      { $group: {
+          _id: '$items.category',
+          terjual: { $sum: { $ifNull: ['$items.quantity', 1] } },
+          omset:   { $sum: '$items.subtotal' },
+      } },
+      { $sort: { omset: -1 } },
+      { $limit: 5 },
+    ];
+    const weekAgg = (start, end) => Transaction.aggregate([
+      { $match: {
+          cabang: { $in: scopedCabangIds },
+          type: 'penjualan',
+          isVoid: { $ne: true },
+          transactionDate: { $gte: start, $lte: end }
+      }},
+      { $group: { _id: null, omset: { $sum: '$total' }, laba: { $sum: '$totalProfit' }, count: { $sum: 1 } } }
+    ]);
+    const peakHoursPipeline = [
+      { $match: {
+          cabang: { $in: scopedCabangIds },
+          type: 'penjualan',
+          isVoid: { $ne: true },
+          transactionDate: { $gte: peakStart, $lte: peakEnd }
+      }},
+      { $group: {
+          _id: { $hour: { date: '$transactionDate', timezone: 'Asia/Jakarta' } },
+          omset: { $sum: '$total' },
+          count: { $sum: 1 }
+      }},
+      { $sort: { _id: 1 } }
+    ];
+    const metodeGlobalPipeline = [
+      { $match: rangeMatch },
+      { $group: { _id: '$paymentMethod', total: { $sum: '$total' }, count: { $sum: 1 } } }
+    ];
+    const metodePerCabangPipeline = [
+      { $match: rangeMatch },
+      { $group: {
+          _id: { cabang: '$cabang', method: '$paymentMethod' },
+          total: { $sum: '$total' },
+          count: { $sum: 1 }
+      }}
+    ];
+    const voidTotalPipeline = [
+      { $match: voidMatch },
+      { $group: { _id: null, count: { $sum: 1 }, totalNilai: { $sum: '$total' } } }
+    ];
+    const voidPerCabangPipeline = [
+      { $match: voidMatch },
+      { $group: { _id: '$cabang', count: { $sum: 1 }, totalNilai: { $sum: '$total' } } }
+    ];
+    const voidTopReasonsPipeline = [
+      { $match: voidMatch },
+      { $addFields: {
+          reasonNormalized: { $trim: { input: { $toLower: { $ifNull: ['$voidReason', 'tanpa alasan'] } } } }
+      }},
+      { $group: {
+          _id: '$reasonNormalized',
+          reason: { $first: { $trim: { input: { $ifNull: ['$voidReason', 'Tanpa alasan'] } } } },
+          count: { $sum: 1 },
+          totalNilai: { $sum: '$total' }
+      }},
+      { $sort: { count: -1 } },
+      { $limit: 5 }
+    ];
+
+    // Jalankan paralel
+    const [
+      trendHarian,
+      fisikRaw, digitalRaw, kategoriRaw,
+      thisWeek, lastWeek,
+      peakHoursRaw,
+      metodeGlobalRaw, metodePerCabangRaw,
+      voidTotal, voidPerCabangRaw, voidTopReasonsRaw
+    ] = await Promise.all([
+      buildTrendData({ cabangs: scopedCabangs, cabangIds: scopedCabangIds, range }),
+      Transaction.aggregate(topProdukPipeline('fisik')),
+      Transaction.aggregate(topProdukPipeline('digital')),
+      Transaction.aggregate(topKategoriPipeline),
+      weekAgg(thisWeekStart, thisWeekEnd),
+      weekAgg(lastWeekStart, lastWeekEnd),
+      Transaction.aggregate(peakHoursPipeline),
+      Transaction.aggregate(metodeGlobalPipeline),
+      Transaction.aggregate(metodePerCabangPipeline),
+      Transaction.aggregate(voidTotalPipeline),
+      Transaction.aggregate(voidPerCabangPipeline),
+      Transaction.aggregate(voidTopReasonsPipeline),
+    ]);
+
+    // Format breakdown
+    const mapProduk = raw => raw.map(p => ({
+      nama: p._id, productCode: p.productCode || null,
+      terjual: p.terjual || 0, omset: p.omset || 0
+    }));
+    const mapKategori = raw => raw.map(k => ({
+      kategori: k._id, terjual: k.terjual || 0, omset: k.omset || 0
+    }));
+
+    // Compare
+    const shapeWeek = r => ({ omset: r[0]?.omset || 0, laba: r[0]?.laba || 0, count: r[0]?.count || 0 });
+
+    // Peak hours: 24 slot penuh
+    const peakByHour = new Map(peakHoursRaw.map(r => [r._id, r]));
+    const peakHours = Array.from({ length: 24 }, (_, jam) => ({
+      jam,
+      omset: peakByHour.get(jam)?.omset || 0,
+      count: peakByHour.get(jam)?.count || 0
+    }));
+
+    // Metode pembayaran
+    const METODE_ENUM = ['cash', 'qris', 'transfer', 'hutang'];
+    const globalMap = new Map(metodeGlobalRaw.map(m => [m._id, m]));
+    const metodeGlobal = METODE_ENUM.map(method => {
+      const row = globalMap.get(method);
+      return { method, total: row?.total || 0, count: row?.count || 0 };
+    });
+
+    const perCabangMap = new Map();
+    for (const r of metodePerCabangRaw) {
+      const cid = String(r._id.cabang);
+      if (!perCabangMap.has(cid)) perCabangMap.set(cid, new Map());
+      perCabangMap.get(cid).set(r._id.method, r);
+    }
+    const metodePerCabang = scopedCabangs.map(c => {
+      const byMethod = perCabangMap.get(String(c._id));
+      return {
+        cabangId: c._id,
+        cabangNama: c.nama,
+        methods: METODE_ENUM.map(method => {
+          const row = byMethod?.get(method);
+          return { method, total: row?.total || 0, count: row?.count || 0 };
+        })
+      };
+    });
+
+    // Void summary
+    const voidPerCabangByCabang = new Map(voidPerCabangRaw.map(v => [String(v._id), v]));
+    const voidPerCabang = scopedCabangs.map(c => {
+      const row = voidPerCabangByCabang.get(String(c._id));
+      return {
+        cabangId: c._id,
+        cabangNama: c.nama,
+        count: row?.count || 0,
+        totalNilai: row?.totalNilai || 0
+      };
+    });
+    const voidTopReasons = voidTopReasonsRaw.map(r => ({
+      reason: r.reason,
+      count: r.count,
+      totalNilai: r.totalNilai
+    }));
+
+    res.json({
+      success: true,
+      range,
+      startDate,
+      endDate,
+      cabang: cabangParamId,
+      breakdown: {
+        produkFisik:   mapProduk(fisikRaw),
+        produkDigital: mapProduk(digitalRaw),
+        kategori:      mapKategori(kategoriRaw)
+      },
+      trendHarian,
+      comparePeriode: {
+        thisWeek: shapeWeek(thisWeek),
+        lastWeek: shapeWeek(lastWeek)
+      },
+      peakHours: {
+        windowDays: peakWindowDays,
+        hours: peakHours
+      },
+      metodePembayaran: {
+        global: metodeGlobal,
+        perCabang: metodePerCabang
+      },
+      voidSummary: {
+        count: voidTotal[0]?.count || 0,
+        totalNilai: voidTotal[0]?.totalNilai || 0,
+        perCabang: voidPerCabang,
+        topReasons: voidTopReasons
+      }
+    });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -761,6 +1162,305 @@ exports.getDashboardWidgets = async (req, res) => {
       produkFisikTerlaris,
       produkDigitalTerlaris,
       metodePembayaran,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+
+// ── Toggle Cabang Aktif/Nonaktif (Owner) ──────────────────────────
+// Sinkron: nonaktifkan cabang → Subscription.status juga jadi 'nonaktif'.
+// Aktifkan lagi → JANGAN otomatis balikin status subscription; Owner harus
+// lewat perpanjangan/konfirmasi bayar.
+exports.toggleCabang = async (req, res) => {
+  try {
+    const owner = req.user;
+    const { cabangId } = req.params;
+
+    if (!mongoose.isValidObjectId(cabangId)) {
+      return res.status(400).json({ success: false, message: 'Cabang tidak valid' });
+    }
+
+    const cabang = await Cabang.findOne({ _id: cabangId, owner: owner._id });
+    if (!cabang) {
+      return res.status(403).json({ success: false, message: 'Cabang bukan milik kamu' });
+    }
+
+    cabang.isActive = !cabang.isActive;
+    await cabang.save();
+
+    if (!cabang.isActive) {
+      await Subscription.updateOne(
+        { cabang: cabang._id },
+        { $set: { status: 'nonaktif' } }
+      );
+    }
+
+    res.json({
+      success: true,
+      message: `Cabang ${cabang.nama} ${cabang.isActive ? 'diaktifkan' : 'dinonaktifkan'}`,
+      data: cabang,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+
+// ══════════════════════════════════════════════════════════════════════════
+// SERVICE HP — Halaman Owner (cross-cabang)
+// ══════════════════════════════════════════════════════════════════════════
+
+// Helper: scope cabang milik owner + optional filter ?cabang=<id>
+async function scopeOwnerCabangs(req) {
+  const owner = req.user;
+  const allCabangs = await Cabang.find({ owner: owner._id }).select('_id nama kode');
+  if (req.query.cabang) {
+    if (!mongoose.isValidObjectId(req.query.cabang)) {
+      return { error: { status: 400, message: 'Cabang tidak valid' } };
+    }
+    const found = allCabangs.find(c => c._id.equals(req.query.cabang));
+    if (!found) return { error: { status: 403, message: 'Cabang bukan milik Anda' } };
+    return { allCabangs, scopedCabangIds: [found._id] };
+  }
+  return { allCabangs, scopedCabangIds: allCabangs.map(c => c._id) };
+}
+
+// Helper: parse ?range → {start, end}. Default 'month'.
+function parseServiceRange(range) {
+  const r = String(range || 'month').toLowerCase();
+  if (!['today', '7', '30', 'month'].includes(r)) return { error: 'Range tidak valid (today|7|30|month)' };
+  const now = new Date();
+  const end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+  let start;
+  if (r === 'today') {
+    start = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+  } else if (r === 'month') {
+    start = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+  } else {
+    const days = r === '7' ? 7 : 30;
+    start = new Date(now); start.setDate(now.getDate() - (days - 1)); start.setHours(0, 0, 0, 0);
+  }
+  return { start, end };
+}
+
+// ── GET /api/owner/service-summary ────────────────────────────────
+// Ringkasan servis cross-cabang milik owner. Support ?range & ?cabang.
+exports.getServiceSummary = async (req, res) => {
+  try {
+    const ServiceTransaction = require('../models/ServiceTransaction');
+
+    const scope = await scopeOwnerCabangs(req);
+    if (scope.error) return res.status(scope.error.status).json({ success: false, message: scope.error.message });
+
+    const range = parseServiceRange(req.query.range);
+    if (range.error) return res.status(400).json({ success: false, message: range.error });
+    const { start, end } = range;
+
+    const cabangMatch = { cabang: { $in: scope.scopedCabangIds } };
+
+    const [paidAgg, statusAgg, durAgg] = await Promise.all([
+      // Omset/laba/jumlahTx: hanya yang sudah dibayar & paidAt di range
+      ServiceTransaction.aggregate([
+        { $match: { ...cabangMatch, isVoid: { $ne: true }, isPaid: true, paidAt: { $gte: start, $lte: end } } },
+        { $group: { _id: null, omset: { $sum: '$totalCost' }, laba: { $sum: '$profit' }, jumlahTx: { $sum: 1 } } }
+      ]),
+      // Status distribution: berdasarkan receivedAt di range (semua txn, exclude void)
+      ServiceTransaction.aggregate([
+        { $match: { ...cabangMatch, isVoid: { $ne: true }, receivedAt: { $gte: start, $lte: end } } },
+        { $group: { _id: '$status', count: { $sum: 1 } } }
+      ]),
+      // Rata-rata durasi jam: (paidAt - receivedAt) untuk yang paidAt in range
+      ServiceTransaction.aggregate([
+        { $match: {
+            ...cabangMatch, isVoid: { $ne: true }, isPaid: true,
+            paidAt: { $gte: start, $lte: end, $ne: null },
+            receivedAt: { $ne: null }
+        } },
+        { $project: { durMs: { $subtract: ['$paidAt', '$receivedAt'] } } },
+        { $match: { durMs: { $gte: 0 } } },
+        { $group: { _id: null, avgMs: { $avg: '$durMs' }, count: { $sum: 1 } } }
+      ]),
+    ]);
+
+    const statusMap = {};
+    statusAgg.forEach(s => { statusMap[s._id] = s.count; });
+
+    const avgMs = durAgg[0]?.avgMs || 0;
+    const avgDurationHours = avgMs > 0 ? Math.round((avgMs / 3600000) * 10) / 10 : 0;
+
+    res.json({
+      success: true,
+      data: {
+        range: String(req.query.range || 'month').toLowerCase(),
+        cabang: req.query.cabang || null,
+        periode: { start, end },
+        omset:    paidAgg[0]?.omset    || 0,
+        laba:     paidAgg[0]?.laba     || 0,
+        jumlahTx: paidAgg[0]?.jumlahTx || 0,
+        statusCount: {
+          antrian: statusMap.antrian || 0,
+          proses:  statusMap.proses  || 0,
+          selesai: statusMap.selesai || 0,
+          diambil: statusMap.diambil || 0,
+          batal:   statusMap.batal   || 0,
+        },
+        avgDurationHours,
+        avgDurationSampleSize: durAgg[0]?.count || 0,
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+
+// ── GET /api/owner/service-list ───────────────────────────────────
+// List transaksi servis cross-cabang milik owner, dengan filter & pagination.
+exports.getServiceList = async (req, res) => {
+  try {
+    const ServiceTransaction = require('../models/ServiceTransaction');
+
+    const scope = await scopeOwnerCabangs(req);
+    if (scope.error) return res.status(scope.error.status).json({ success: false, message: scope.error.message });
+
+    const { status, search } = req.query;
+    const page  = Math.max(parseInt(req.query.page)  || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 25, 1), 100);
+    const skip  = (page - 1) * limit;
+
+    const query = {
+      cabang: { $in: scope.scopedCabangIds },
+      isVoid: { $ne: true },
+    };
+    if (status) query.status = status;
+    if (search) {
+      const re = new RegExp(search, 'i');
+      query.$or = [
+        { customerName: re },
+        { deviceBrand:  re },
+        { deviceModel:  re },
+      ];
+    }
+
+    const [total, data] = await Promise.all([
+      ServiceTransaction.countDocuments(query),
+      ServiceTransaction.find(query)
+        .sort({ receivedAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .select('customerName deviceBrand deviceModel complaint status receivedAt paidAt totalCost cabang technician invoiceNumber')
+        .populate('cabang', 'nama kode')
+        .populate('technician', 'name')
+        .lean(),
+    ]);
+
+    res.json({ success: true, data, total, page, limit });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+
+// ── GET /api/owner/service/:id ────────────────────────────────────
+// Detail 1 servis. Validasi: cabang service HARUS milik owner.
+exports.getServiceDetail = async (req, res) => {
+  try {
+    const ServiceTransaction = require('../models/ServiceTransaction');
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'ID tidak valid' });
+    }
+
+    const owner = req.user;
+    const ownerCabangIds = (await Cabang.find({ owner: owner._id }).select('_id')).map(c => String(c._id));
+
+    const doc = await ServiceTransaction.findById(id)
+      .populate('cabang', 'nama kode')
+      .populate('createdBy', 'name')
+      .populate('technician', 'name')
+      .lean();
+    if (!doc) return res.status(404).json({ success: false, message: 'Tidak ditemukan' });
+
+    const svcCabangId = doc.cabang?._id ? String(doc.cabang._id) : String(doc.cabang);
+    if (!ownerCabangIds.includes(svcCabangId)) {
+      return res.status(403).json({ success: false, message: 'Servis bukan milik cabang Anda' });
+    }
+
+    res.json({ success: true, data: doc });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+
+// ── GET /api/owner/service-analytics ──────────────────────────────
+// topKeluhan (keyword bucket dari complaint) + performaTeknisi (group by technician).
+// Default window: bulan berjalan. Cross-cabang, respect ?cabang.
+const KELUHAN_BUCKETS = [
+  { key: 'lcd',        label: 'LCD / Layar',    regex: /lcd|layar|touchscreen|touch screen|ts /i },
+  { key: 'baterai',    label: 'Baterai',        regex: /baterai|batre|batery|battery/i },
+  { key: 'charging',   label: 'Charging',       regex: /charg|casan|cas |ngecas|colokan|port cas/i },
+  { key: 'speaker',    label: 'Speaker / Suara', regex: /speaker|suara|earpiece|mic/i },
+  { key: 'software',   label: 'Software',       regex: /software|sistem|reset|flash|firmware|aplikasi|hang|lemot|bootloop/i },
+  { key: 'mati_total', label: 'Mati Total',     regex: /mati total|matot|mati$|mati saja|no display|blank/i },
+  { key: 'kamera',     label: 'Kamera',         regex: /kamera|camera/i },
+];
+
+exports.getServiceAnalytics = async (req, res) => {
+  try {
+    const ServiceTransaction = require('../models/ServiceTransaction');
+
+    const scope = await scopeOwnerCabangs(req);
+    if (scope.error) return res.status(scope.error.status).json({ success: false, message: scope.error.message });
+
+    const now   = new Date();
+    const start = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+    const end   = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+
+    const cabangMatch = { cabang: { $in: scope.scopedCabangIds }, isVoid: { $ne: true } };
+
+    const [complaints, teknisiAgg] = await Promise.all([
+      ServiceTransaction.find({ ...cabangMatch, receivedAt: { $gte: start, $lte: end } })
+        .select('complaint').lean(),
+      ServiceTransaction.aggregate([
+        { $match: { ...cabangMatch, technician: { $ne: null }, isPaid: true, paidAt: { $gte: start, $lte: end } } },
+        { $group: { _id: '$technician', jumlahTx: { $sum: 1 }, omset: { $sum: '$totalCost' }, laba: { $sum: '$profit' } } },
+        { $lookup: { from: 'users', localField: '_id', foreignField: '_id', as: 'user' } },
+        { $unwind: '$user' },
+        { $project: { _id: 1, name: '$user.name', jumlahTx: 1, omset: 1, laba: 1 } },
+        { $sort: { jumlahTx: -1 } },
+      ]),
+    ]);
+
+    // Bucket keluhan
+    const buckets = KELUHAN_BUCKETS.map(b => ({ key: b.key, label: b.label, count: 0 }));
+    const lainnya = { key: 'lainnya', label: 'Lainnya', count: 0 };
+    for (const doc of complaints) {
+      const txt = doc.complaint || '';
+      let matched = false;
+      for (let i = 0; i < KELUHAN_BUCKETS.length; i++) {
+        if (KELUHAN_BUCKETS[i].regex.test(txt)) {
+          buckets[i].count += 1;
+          matched = true;
+          break;
+        }
+      }
+      if (!matched) lainnya.count += 1;
+    }
+    const topKeluhan = [...buckets, lainnya]
+      .filter(b => b.count > 0)
+      .sort((a, b) => b.count - a.count);
+
+    res.json({
+      success: true,
+      data: {
+        cabang: req.query.cabang || null,
+        periode: { start, end },
+        topKeluhan,
+        performaTeknisi: teknisiAgg,
+      }
     });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

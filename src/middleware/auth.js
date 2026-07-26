@@ -1,5 +1,7 @@
-const jwt  = require('jsonwebtoken');
-const User = require('../models/User');
+const jwt      = require('jsonwebtoken');
+const mongoose = require('mongoose');
+const User     = require('../models/User');
+const Cabang   = require('../models/Cabang');
 
 exports.protect = async (req, res, next) => {
   let token;
@@ -48,4 +50,24 @@ exports.cabangFilter = (req, res, next) => {
     req.cabangFilter = { cabang: cabangId };
   }
   next();
+};
+
+// Middleware: seperti cabangFilter, tapi Owner boleh switch cabang via ?cabang=<id>
+// (dibatasi ke cabang milik owner sendiri). Non-owner fallback ke cabangFilter biasa.
+exports.cabangFilterWithOwner = async (req, res, next) => {
+  try {
+    if (req.user?.role === 'owner' && req.query.cabang) {
+      if (!mongoose.isValidObjectId(req.query.cabang)) {
+        return res.status(400).json({ success: false, message: 'Cabang tidak valid' });
+      }
+      const cabang = await Cabang.findOne({ _id: req.query.cabang, owner: req.user._id });
+      if (!cabang) {
+        return res.status(403).json({ success: false, message: 'Cabang bukan milik kamu' });
+      }
+      req.cabangFilter = { cabang: cabang._id };
+      req.user.cabang  = cabang;
+      return next();
+    }
+    return exports.cabangFilter(req, res, next);
+  } catch (err) { return next(err); }
 };

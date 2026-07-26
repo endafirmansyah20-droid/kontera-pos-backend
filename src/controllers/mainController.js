@@ -520,15 +520,20 @@ exports.getFinanceSummary = async (req, res) => {
   try {
     const { startDate, endDate } = req.query;
     const cabangQ = req.cabangFilter || {};
-    let dq = {};
-    if (startDate) dq.$gte = new Date(startDate);
-    if (endDate) { const e=new Date(endDate); e.setHours(23,59,59); dq.$lte=e; }
-    const txQuery = { type: 'penjualan', isVoid: { $ne: true }, ...cabangQ };
-    if (Object.keys(dq).length) txQuery.transactionDate = dq;
-    const fQuery = { ...cabangQ, ...(Object.keys(dq).length ? { date: dq } : {}) };
+    // Default periode: bulan berjalan (kalau frontend tidak kirim date).
+    // Konsisten dengan serviceController.getSummary & endpoint report lain.
+    const now = new Date();
+    const dq = {};
+    dq.$gte = startDate ? new Date(startDate) : new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+    if (endDate) { const e = new Date(endDate); e.setHours(23,59,59); dq.$lte = e; }
+    else dq.$lte = new Date(now.getFullYear(), now.getMonth()+1, 0, 23, 59, 59, 999);
+    const txQuery = { type: 'penjualan', isVoid: { $ne: true }, ...cabangQ, transactionDate: dq };
+    const fQuery  = { ...cabangQ, date: dq };
     const [transactions, expenses, incomes, debts, receivables] = await Promise.all([
       Transaction.find(txQuery),
-      Finance.aggregate([{ $match: { ...fQuery, type: 'pengeluaran' } }, { $group: { _id: null, total: { $sum: '$amount' } } }]),
+      // Exclude 'Pembelian Stok' — sudah tercermin di modal produk (cegah double counting).
+      // Konsisten dengan getMonthlyReport/getMonthlyDetail/getDashboard.
+      Finance.aggregate([{ $match: { ...fQuery, type: 'pengeluaran', category: { $nin: EXCLUDE_FROM_LABA } } }, { $group: { _id: null, total: { $sum: '$amount' } } }]),
       Finance.aggregate([{ $match: { ...fQuery, type: 'pemasukan' } }, { $group: { _id: null, total: { $sum: '$amount' } } }]),
       Finance.aggregate([{ $match: { ...cabangQ, type: 'hutang', isPaid: false } }, { $group: { _id: null, total: { $sum: '$amount' } } }]),
       Finance.aggregate([{ $match: { ...cabangQ, type: 'piutang', isPaid: false } }, { $group: { _id: null, total: { $sum: '$amount' } } }])

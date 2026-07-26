@@ -1,9 +1,9 @@
 const router = require('express').Router();
 const ctrl = require('../controllers/saldoController');
-const { protect, adminOnly, cabangFilter } = require('../middleware/auth');
+const { protect, adminOnly, cabangFilterWithOwner } = require('../middleware/auth');
 
 router.use(protect);
-router.use(cabangFilter);
+router.use(cabangFilterWithOwner);
 
 // Akun management
 router.get('/', ctrl.getAllSaldo);

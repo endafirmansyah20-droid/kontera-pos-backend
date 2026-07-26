@@ -1,9 +1,9 @@
 const router = require('express').Router();
 const ctrl = require('../controllers/productController');
-const { protect, adminOnly } = require('../middleware/auth');
+const { protect, adminOnly, cabangFilterWithOwner } = require('../middleware/auth');
 
 router.use(protect);
-router.use(require('../middleware/auth').cabangFilter);
+router.use(cabangFilterWithOwner);
 router.get('/', ctrl.getProducts);
 router.get('/low-stock', ctrl.getLowStock);
 router.get('/by-code/:code', ctrl.getProductByCode);

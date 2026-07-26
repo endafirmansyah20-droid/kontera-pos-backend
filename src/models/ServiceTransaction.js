@@ -49,6 +49,7 @@ const serviceTransactionSchema = new mongoose.Schema({
 
   // ── Metadata ───────────────────────────────────────────────
   createdBy:  { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  technician: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: false, default: null },
   notes:      { type: String, default: '' },
   isVoid:     { type: Boolean, default: false },
   isArchived: { type: Boolean, default: false },

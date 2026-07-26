@@ -1,9 +1,9 @@
 const router = require('express').Router();
 const ctrl = require('../controllers/transactionController');
-const { protect, adminOnly } = require('../middleware/auth');
+const { protect, adminOnly, cabangFilterWithOwner } = require('../middleware/auth');
 
 router.use(protect);
-router.use(require('../middleware/auth').cabangFilter);
+router.use(cabangFilterWithOwner);
 router.get('/', ctrl.getTransactions);
 router.get('/voided/list', adminOnly, ctrl.getVoidedTransactions);
 router.get('/anomaly/count', adminOnly, ctrl.getAnomalyCount);

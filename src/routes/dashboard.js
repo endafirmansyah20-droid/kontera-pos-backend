@@ -1,9 +1,9 @@
 const router = require('express').Router();
 const { getDashboard, getChartData, getTargetOmset, setTargetOmset, getKategoriStats } = require('../controllers/mainController');
-const { protect, cabangFilter, adminOnly } = require('../middleware/auth');
+const { protect, cabangFilterWithOwner, adminOnly } = require('../middleware/auth');
 
 router.use(protect);
-router.use(cabangFilter);
+router.use(cabangFilterWithOwner);
 router.get('/', getDashboard);
 router.get('/chart-data', getChartData);
 router.get('/target-omset', getTargetOmset);

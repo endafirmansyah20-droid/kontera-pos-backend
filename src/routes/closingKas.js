@@ -1,9 +1,9 @@
 const router = require('express').Router();
 const ctrl = require('../controllers/closingKasController');
-const { protect, adminOnly, cabangFilter } = require('../middleware/auth');
+const { protect, adminOnly, cabangFilterWithOwner } = require('../middleware/auth');
 
 router.use(protect);
-router.use(cabangFilter);
+router.use(cabangFilterWithOwner);
 router.get('/summary', ctrl.getSummaryHariIni);
 router.get('/kas-summary', ctrl.getKasSummary);
 router.get('/riwayat', ctrl.getRiwayat);

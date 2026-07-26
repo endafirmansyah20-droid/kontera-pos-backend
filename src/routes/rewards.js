@@ -1,9 +1,9 @@
 const router = require('express').Router();
 const ctrl   = require('../controllers/rewardController');
-const { protect, adminOnly, cabangFilter } = require('../middleware/auth');
+const { protect, adminOnly, cabangFilterWithOwner } = require('../middleware/auth');
 
 router.use(protect);
-router.use(cabangFilter);
+router.use(cabangFilterWithOwner);
 
 const adminOrOwner = (req, res, next) => {
   if (['admin','superadmin','owner'].includes(req.user?.role)) return next();

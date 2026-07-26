@@ -5,10 +5,10 @@ const {
   exportModalExcel, exportModalPDF,
   exportServiceExcel, exportServicePDF,
 } = require('../controllers/mainController');
-const { protect, cabangFilter } = require('../middleware/auth');
+const { protect, cabangFilterWithOwner } = require('../middleware/auth');
 
 router.use(protect);
-router.use(cabangFilter);
+router.use(cabangFilterWithOwner);
 router.get('/sales',                getSalesReport);
 router.get('/monthly',              getMonthlyReport);
 router.get('/monthly-detail',       getMonthlyDetail);

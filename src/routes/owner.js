@@ -6,7 +6,9 @@ const {
   getUsers, tambahUser, toggleUser, editUser, resetUserPassword,
   getEmployeeStats, getEmployeeTransactions, getCabangSummary, getRecentActivity,
   getHourlyChart, getDashboardWidgets, getPenjualanAnalytics, toggleCabang,
-  getServiceSummary, getServiceList, getServiceDetail, getServiceAnalytics
+  getServiceSummary, getServiceList, getServiceDetail, getServiceAnalytics,
+  getClosingRiwayat, getClosingDetail,
+  getPembelianRiwayat, getPembelianDetail, getOwnerReportsMonthly
 } = require('../controllers/ownerController');
 const { protect, superAdminOnly } = require('../middleware/auth');
 
@@ -30,6 +32,11 @@ router.get('/service-summary',                    protect,         getServiceSum
 router.get('/service-list',                       protect,         getServiceList);
 router.get('/service-analytics',                  protect,         getServiceAnalytics);
 router.get('/service/:id',                        protect,         getServiceDetail);
+router.get('/closing-riwayat',                    protect,         getClosingRiwayat);
+router.get('/closing/:id',                        protect,         getClosingDetail);
+router.get('/pembelian-riwayat',                  protect,         getPembelianRiwayat);
+router.get('/pembelian/:id',                      protect,         getPembelianDetail);
+router.get('/reports/monthly',                    protect,         getOwnerReportsMonthly);
 // ── SuperAdmin ──────────────────────────────────────────────────────────────
 router.get('/subscriptions',                      protect, superAdminOnly, getAllSubscriptions);
 router.put('/subscriptions/:subscriptionId/konfirmasi', protect, superAdminOnly, konfirmasiPembayaran);

@@ -125,6 +125,13 @@ exports.getDetail = async (req, res) => {
   try {
     const data = await Pembelian.findById(req.params.id);
     if (!data) return res.status(404).json({ success: false, message: 'Data tidak ditemukan' });
+    // Validasi cabang: pembelian.cabang harus match scope req.cabangFilter.cabang.
+    // Superadmin (req.cabangFilter = {}) → allow all.
+    // Admin/karyawan/owner → scoped ke 1 cabang; harus match pembelian.cabang.
+    const scoped = req.cabangFilter?.cabang;
+    if (scoped && String(data.cabang) !== String(scoped)) {
+      return res.status(403).json({ success: false, message: 'Pembelian bukan milik cabang Anda' });
+    }
     res.json({ success: true, data });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };

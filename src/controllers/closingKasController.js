@@ -345,6 +345,13 @@ exports.getDetail = async (req, res) => {
   try {
     const closing = await ClosingKas.findById(req.params.id);
     if (!closing) return res.status(404).json({ success: false, message: 'Data tidak ditemukan' });
+    // Validasi cabang: closing.cabang harus match scope req.cabangFilter.cabang.
+    // Superadmin (req.cabangFilter = {}) → allow all.
+    // Admin/karyawan/owner → scoped ke 1 cabang; harus match closing.cabang.
+    const scoped = req.cabangFilter?.cabang;
+    if (scoped && String(closing.cabang) !== String(scoped)) {
+      return res.status(403).json({ success: false, message: 'Closing bukan milik cabang Anda' });
+    }
     res.json({ success: true, data: closing });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };

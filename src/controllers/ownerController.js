@@ -1466,3 +1466,303 @@ exports.getServiceAnalytics = async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 };
+
+
+// ══════════════════════════════════════════════════════════════════════════
+// CLOSING KAS — Halaman Owner Laporan (cross-cabang)
+// ══════════════════════════════════════════════════════════════════════════
+
+// ── GET /api/owner/closing-riwayat ────────────────────────────────
+// List closing kas lintas SEMUA cabang milik owner, dengan filter & pagination.
+exports.getClosingRiwayat = async (req, res) => {
+  try {
+    const ClosingKas = require('../models/ClosingKas');
+
+    const scope = await scopeOwnerCabangs(req);
+    if (scope.error) return res.status(scope.error.status).json({ success: false, message: scope.error.message });
+
+    const { type, dateStart, dateEnd } = req.query;
+    const page  = Math.max(parseInt(req.query.page)  || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 20, 1), 100);
+    const skip  = (page - 1) * limit;
+
+    const query = { cabang: { $in: scope.scopedCabangIds } };
+    if (type && ['cash', 'produk'].includes(type)) query.type = type;
+    if (dateStart || dateEnd) {
+      query.tanggal = {};
+      if (dateStart) query.tanggal.$gte = new Date(dateStart);
+      if (dateEnd)   { const e = new Date(dateEnd); e.setHours(23,59,59,999); query.tanggal.$lte = e; }
+    }
+
+    const [total, data] = await Promise.all([
+      ClosingKas.countDocuments(query),
+      ClosingKas.find(query)
+        .sort({ tanggal: -1, createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .populate('cabang', 'nama kode')
+        .populate('createdBy', 'name')
+        .lean(),
+    ]);
+
+    res.json({ success: true, data, total, page, limit });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+
+// ── GET /api/owner/closing/:id ────────────────────────────────────
+// Detail 1 closing. Validasi: closing.cabang HARUS milik owner.
+exports.getClosingDetail = async (req, res) => {
+  try {
+    const ClosingKas = require('../models/ClosingKas');
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'ID tidak valid' });
+    }
+
+    const owner = req.user;
+    const ownerCabangIds = (await Cabang.find({ owner: owner._id }).select('_id')).map(c => String(c._id));
+
+    const doc = await ClosingKas.findById(id)
+      .populate('cabang', 'nama kode')
+      .populate('createdBy', 'name')
+      .lean();
+    if (!doc) return res.status(404).json({ success: false, message: 'Tidak ditemukan' });
+
+    const closingCabangId = doc.cabang?._id ? String(doc.cabang._id) : String(doc.cabang);
+    if (!ownerCabangIds.includes(closingCabangId)) {
+      return res.status(403).json({ success: false, message: 'Closing bukan milik cabang Anda' });
+    }
+
+    res.json({ success: true, data: doc });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+
+// ══════════════════════════════════════════════════════════════════════════
+// PEMBELIAN STOK — Halaman Owner Laporan (cross-cabang)
+// ══════════════════════════════════════════════════════════════════════════
+
+// ── GET /api/owner/pembelian-riwayat ──────────────────────────────
+// List pembelian lintas SEMUA cabang milik owner, dengan filter & pagination.
+exports.getPembelianRiwayat = async (req, res) => {
+  try {
+    const Pembelian = require('../models/Pembelian');
+
+    const scope = await scopeOwnerCabangs(req);
+    if (scope.error) return res.status(scope.error.status).json({ success: false, message: scope.error.message });
+
+    const { supplier, dateStart, dateEnd } = req.query;
+    const page  = Math.max(parseInt(req.query.page)  || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 20, 1), 100);
+    const skip  = (page - 1) * limit;
+
+    const query = { cabang: { $in: scope.scopedCabangIds } };
+    if (supplier) query.supplier = new RegExp(supplier, 'i');
+    if (dateStart || dateEnd) {
+      query.tanggal = {};
+      if (dateStart) query.tanggal.$gte = new Date(dateStart);
+      if (dateEnd)   { const e = new Date(dateEnd); e.setHours(23,59,59,999); query.tanggal.$lte = e; }
+    }
+
+    const [total, data] = await Promise.all([
+      Pembelian.countDocuments(query),
+      Pembelian.find(query)
+        .sort({ tanggal: -1, createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .populate('cabang', 'nama kode')
+        .populate('createdBy', 'name')
+        .lean(),
+    ]);
+
+    res.json({ success: true, data, total, page, limit });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+
+// ── GET /api/owner/pembelian/:id ──────────────────────────────────
+// Detail 1 pembelian. Validasi: pembelian.cabang HARUS milik owner.
+exports.getPembelianDetail = async (req, res) => {
+  try {
+    const Pembelian = require('../models/Pembelian');
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'ID tidak valid' });
+    }
+
+    const owner = req.user;
+    const ownerCabangIds = (await Cabang.find({ owner: owner._id }).select('_id')).map(c => String(c._id));
+
+    const doc = await Pembelian.findById(id)
+      .populate('cabang', 'nama kode')
+      .populate('createdBy', 'name')
+      .lean();
+    if (!doc) return res.status(404).json({ success: false, message: 'Tidak ditemukan' });
+
+    const pembelianCabangId = doc.cabang?._id ? String(doc.cabang._id) : String(doc.cabang);
+    if (!ownerCabangIds.includes(pembelianCabangId)) {
+      return res.status(403).json({ success: false, message: 'Pembelian bukan milik cabang Anda' });
+    }
+
+    res.json({ success: true, data: doc });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+
+// ══════════════════════════════════════════════════════════════════════════
+// LAPORAN BULANAN — Halaman Owner Laporan (cross-cabang)
+// ══════════════════════════════════════════════════════════════════════════
+
+// Konstanta konsisten dengan mainController.js (keep in sync)
+const EXCLUDE_FROM_LABA_OWNER    = ['Pembelian Stok'];
+const CASHBACK_CATEGORIES_OWNER  = ['Cashback / Fee'];
+
+// ── GET /api/owner/reports/monthly?year=<>&cabang=all|<id> ───────
+// Laporan bulanan 12-bulan. Kalau cabang=all/omitted: aggregate SEMUA cabang
+// milik owner. Kalau cabang=<id>: scope ke 1 cabang (validated milik owner).
+// Response format: sama seperti mainController.getMonthlyReport.
+exports.getOwnerReportsMonthly = async (req, res) => {
+  try {
+    const Transaction = require('../models/Transaction');
+    const { Finance } = require('../models/index');
+
+    const owner = req.user;
+    const allCabangs = await Cabang.find({ owner: owner._id }).select('_id nama kode');
+
+    // Scope cabang: 'all' / omitted → semua cabang owner. Kalau id → 1 cabang (validate).
+    let cabangIds;
+    const cabangParam = req.query.cabang;
+    if (cabangParam && cabangParam !== 'all') {
+      if (!mongoose.isValidObjectId(cabangParam)) {
+        return res.status(400).json({ success: false, message: 'Cabang tidak valid' });
+      }
+      const found = allCabangs.find(c => c._id.equals(cabangParam));
+      if (!found) return res.status(403).json({ success: false, message: 'Cabang bukan milik Anda' });
+      cabangIds = [found._id];
+    } else {
+      cabangIds = allCabangs.map(c => c._id);
+    }
+
+    const year      = parseInt(req.query.year) || new Date().getFullYear();
+    const yearStart = new Date(year, 0, 1, 0, 0, 0, 0);
+    const yearEnd   = new Date(year, 11, 31, 23, 59, 59, 999);
+
+    // Optional month: scope breakdownMode ke 1 bulan spesifik (1-12). months[] & ringkasan tetap tahunan.
+    let month = null;
+    if (req.query.month !== undefined && req.query.month !== '') {
+      const m = parseInt(req.query.month);
+      if (!Number.isInteger(m) || m < 1 || m > 12) {
+        return res.status(400).json({ success: false, message: 'Month harus integer 1-12' });
+      }
+      month = m;
+    }
+
+    const txMatch = { type: 'penjualan', isVoid: { $ne: true }, transactionDate: { $gte: yearStart, $lte: yearEnd }, cabang: { $in: cabangIds } };
+    const fMatch  = { date: { $gte: yearStart, $lte: yearEnd }, cabang: { $in: cabangIds } };
+
+    // Scope khusus untuk breakdownMode kalau month diisi.
+    // Pakai $month (UTC) supaya konsisten dengan txPerMonth yang group $month — kalau slicing pakai
+    // new Date(year, m-1, 1) local, tx di ujung bulan bisa geser bucket dan sum breakdown tidak match months[m-1].
+    const modeMatch = month
+      ? { ...txMatch, $expr: { $eq: [{ $month: '$transactionDate' }, month] } }
+      : txMatch;
+
+    const [txPerMonth, finPerMonth, modeAgg] = await Promise.all([
+      Transaction.aggregate([
+        { $match: txMatch },
+        { $group: {
+            _id: { $month: '$transactionDate' },
+            omset:      { $sum: '$total' },
+            labaKotor:  { $sum: '$totalProfit' },
+            jumlahTx:   { $sum: 1 },
+            jumlahItem: { $sum: { $size: { $ifNull: ['$items', []] } } },
+        }},
+        { $sort: { _id: 1 } }
+      ]),
+      Finance.aggregate([
+        { $match: { ...fMatch, type: { $in: ['pemasukan', 'pengeluaran'] } } },
+        { $group: {
+            _id: { bulan: { $month: '$date' }, type: '$type', category: '$category' },
+            total: { $sum: '$amount' }
+        }}
+      ]),
+      // Breakdown Ritel vs Grosir — scope tahunan, atau ke 1 bulan kalau month diisi
+      Transaction.aggregate([
+        { $match: modeMatch },
+        { $group: {
+            _id: '$isGrosir',
+            omset: { $sum: '$total' },
+            laba:  { $sum: '$totalProfit' },
+            count: { $sum: 1 },
+        }}
+      ]),
+    ]);
+
+    const BULAN = ['Jan','Feb','Mar','Apr','Mei','Jun','Jul','Agu','Sep','Okt','Nov','Des'];
+    const months = Array.from({ length: 12 }, (_, i) => {
+      const tx  = txPerMonth.find(t => t._id === i + 1) || {};
+      const fin = finPerMonth.filter(f => f._id.bulan === i + 1);
+      const pemasukan     = fin.filter(f => f._id.type === 'pemasukan').reduce((t,f) => t + f.total, 0);
+      const pengeluaran   = fin.filter(f => f._id.type === 'pengeluaran').reduce((t,f) => t + f.total, 0);
+      const pengeluaranOp = fin.filter(f => f._id.type === 'pengeluaran' && !EXCLUDE_FROM_LABA_OWNER.includes(f._id.category)).reduce((t,f) => t + f.total, 0);
+      const cashbackFee   = fin.filter(f => f._id.type === 'pemasukan' && CASHBACK_CATEGORIES_OWNER.includes(f._id.category)).reduce((t,f) => t + f.total, 0);
+      const labaKotor     = tx.labaKotor || 0;
+      const labaBersih    = labaKotor - pengeluaranOp + cashbackFee;
+      return {
+        bulan: i + 1, label: BULAN[i],
+        omset: tx.omset || 0,
+        labaKotor,
+        pemasukan,
+        pengeluaran: pengeluaranOp,
+        labaBersih,
+        jumlahTx:   tx.jumlahTx   || 0,
+        jumlahItem: tx.jumlahItem || 0,
+      };
+    });
+
+    const ringkasan = months.reduce((acc, m) => ({
+      omset:       acc.omset       + m.omset,
+      labaKotor:   acc.labaKotor   + m.labaKotor,
+      pemasukan:   acc.pemasukan   + m.pemasukan,
+      pengeluaran: acc.pengeluaran + m.pengeluaran,
+      labaBersih:  acc.labaBersih  + m.labaBersih,
+      jumlahTx:    acc.jumlahTx    + m.jumlahTx,
+      jumlahItem:  acc.jumlahItem  + m.jumlahItem,
+    }), { omset: 0, labaKotor: 0, pemasukan: 0, pengeluaran: 0, labaBersih: 0, jumlahTx: 0, jumlahItem: 0 });
+
+    // Remap breakdownMode: isGrosir true → grosir, else (false/null/undefined) → ritel.
+    // Pakai reduce agar bucket false & null/missing sama-sama terhitung sebagai ritel.
+    const modeTotals = { ritel: { omset: 0, laba: 0, count: 0 }, grosir: { omset: 0, laba: 0, count: 0 } };
+    for (const r of modeAgg) {
+      const bucket = r._id === true ? 'grosir' : 'ritel';
+      modeTotals[bucket].omset += r.omset || 0;
+      modeTotals[bucket].laba  += r.laba  || 0;
+      modeTotals[bucket].count += r.count || 0;
+    }
+    const breakdownMode = ['ritel', 'grosir'].map(mode => ({ mode, ...modeTotals[mode] }));
+
+    res.json({
+      success: true,
+      data: {
+        year,
+        month,
+        cabang: cabangParam || 'all',
+        scopedCabangIds: cabangIds.map(String),
+        months,
+        ringkasan,
+        breakdownMode,
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};

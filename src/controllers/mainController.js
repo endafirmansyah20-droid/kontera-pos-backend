@@ -750,6 +750,7 @@ exports.getMonthlyDetail = async (req, res) => {
       byPayment,
       topProduk,
       financeRecords,
+      modeAgg,
     ] = await Promise.all([
       // Transaksi per hari
       Transaction.aggregate([
@@ -810,6 +811,17 @@ exports.getMonthlyDetail = async (req, res) => {
           count: { $sum: 1 },
         }}
       ]),
+
+      // Breakdown Ritel (isGrosir=false) vs Grosir (isGrosir=true)
+      Transaction.aggregate([
+        { $match: txMatch },
+        { $group: {
+          _id: '$isGrosir',
+          omset: { $sum: '$total' },
+          laba:  { $sum: '$totalProfit' },
+          count: { $sum: 1 },
+        }}
+      ]),
     ]);
 
     // Hitung total dari semua tx
@@ -831,6 +843,17 @@ exports.getMonthlyDetail = async (req, res) => {
       return { hari: i + 1, omset: d.omset || 0, laba: d.laba || 0, jumlahTx: d.jumlahTx || 0 };
     });
 
+    // Remap breakdown Ritel vs Grosir: isGrosir true → grosir, else (false/null/undefined) → ritel.
+    // Pakai reduce agar bucket false & null/missing sama-sama terhitung sebagai ritel.
+    const modeTotals = { ritel: { omset: 0, laba: 0, count: 0 }, grosir: { omset: 0, laba: 0, count: 0 } };
+    for (const r of modeAgg) {
+      const bucket = r._id === true ? 'grosir' : 'ritel';
+      modeTotals[bucket].omset += r.omset || 0;
+      modeTotals[bucket].laba  += r.laba  || 0;
+      modeTotals[bucket].count += r.count || 0;
+    }
+    const breakdownMode = ['ritel', 'grosir'].map(mode => ({ mode, ...modeTotals[mode] }));
+
     res.json({
       success: true,
       data: {
@@ -840,6 +863,7 @@ exports.getMonthlyDetail = async (req, res) => {
         byKategoriProduk,
         byPayment,
         topProduk,
+        breakdownMode,
       }
     });
   } catch (err) {

@@ -8,7 +8,8 @@ const {
   getHourlyChart, getDashboardWidgets, getPenjualanAnalytics, toggleCabang,
   getServiceSummary, getServiceList, getServiceDetail, getServiceAnalytics,
   getClosingRiwayat, getClosingDetail,
-  getPembelianRiwayat, getPembelianDetail, getOwnerReportsMonthly
+  getPembelianRiwayat, getPembelianDetail, getOwnerReportsMonthly,
+  getOwnerNotifications
 } = require('../controllers/ownerController');
 const { protect, superAdminOnly } = require('../middleware/auth');
 
@@ -37,6 +38,7 @@ router.get('/closing/:id',                        protect,         getClosingDet
 router.get('/pembelian-riwayat',                  protect,         getPembelianRiwayat);
 router.get('/pembelian/:id',                      protect,         getPembelianDetail);
 router.get('/reports/monthly',                    protect,         getOwnerReportsMonthly);
+router.get('/notifications',                      protect,         getOwnerNotifications);
 // ── SuperAdmin ──────────────────────────────────────────────────────────────
 router.get('/subscriptions',                      protect, superAdminOnly, getAllSubscriptions);
 router.put('/subscriptions/:subscriptionId/konfirmasi', protect, superAdminOnly, konfirmasiPembayaran);

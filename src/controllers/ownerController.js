@@ -294,7 +294,21 @@ exports.getUsers = async (req, res) => {
     const owner = req.user;
     const cabangs = await Cabang.find({ owner: owner._id }).select('_id');
     const cabangIds = cabangs.map(c => c._id);
-    const users = await User.find({ cabang: { $in: cabangIds }, role: { $in: ['admin','karyawan'] } }).populate('cabang','nama kode').sort('-createdAt');
+
+    // Filter opsional per cabang (pattern sama dgn getEmployeeStats)
+    let cabangFilter;
+    if (req.query.cabang) {
+      if (!mongoose.isValidObjectId(req.query.cabang)) {
+        return res.status(400).json({ success: false, message: 'Cabang tidak valid' });
+      }
+      const owned = cabangIds.some(id => id.equals(req.query.cabang));
+      if (!owned) return res.status(403).json({ success: false, message: 'Cabang bukan milik Anda' });
+      cabangFilter = new mongoose.Types.ObjectId(req.query.cabang);
+    } else {
+      cabangFilter = { $in: cabangIds };
+    }
+
+    const users = await User.find({ cabang: cabangFilter, role: { $in: ['admin','karyawan'] } }).populate('cabang','nama kode').sort('-createdAt');
     res.json({ success: true, data: users });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
@@ -547,7 +561,20 @@ exports.getCabangSummary = async (req, res) => {
     const Product = require('../models/Product');
     const owner = req.user;
 
-    const cabangs = await Cabang.find({ owner: owner._id, isActive: true });
+    // Filter opsional ?cabang=<id> — dipakai halaman detail cabang untuk
+    // compute 1 cabang saja. isActive filter di-drop saat by-ID karena owner
+    // explicit request; kalau tidak, cabang nonaktif jadi invisible di detail.
+    let cabangs;
+    if (req.query.cabang) {
+      if (!mongoose.isValidObjectId(req.query.cabang)) {
+        return res.status(400).json({ success: false, message: 'Cabang tidak valid' });
+      }
+      const one = await Cabang.findOne({ _id: req.query.cabang, owner: owner._id });
+      if (!one) return res.status(403).json({ success: false, message: 'Cabang bukan milik Anda' });
+      cabangs = [one];
+    } else {
+      cabangs = await Cabang.find({ owner: owner._id, isActive: true });
+    }
     const cabangIds = cabangs.map(c => c._id);
 
     const now = new Date();
@@ -1762,6 +1789,236 @@ exports.getOwnerReportsMonthly = async (req, res) => {
         breakdownMode,
       }
     });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+
+// ── Notifikasi Owner (on-demand compute lintas 6 kategori) ──────
+// State-based, tidak menyimpan history. Semua query dibatasi cabang milik owner.
+exports.getOwnerNotifications = async (req, res) => {
+  try {
+    const Transaction        = require('../models/Transaction');
+    const ServiceTransaction = require('../models/ServiceTransaction');
+    const ClosingKas         = require('../models/ClosingKas');
+    const Product            = require('../models/Product');
+    const { Finance }        = require('../models');
+
+    const owner = req.user;
+    const now   = new Date();
+    const sevenDaysAgo   = new Date(now.getTime() - 7 * 86400000);
+    const thirtyDaysAgo  = new Date(now.getTime() - 30 * 86400000);
+    const todayEndOfDay  = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+
+    const AMOUNT_THRESHOLD = 500000;
+
+    const fmtRp = (n) => 'Rp ' + Number(n || 0).toLocaleString('id-ID');
+
+    // Ambil semua cabang milik owner (aktif saja — cabang nonaktif tidak perlu dinotifkan)
+    const cabangs = await Cabang.find({ owner: owner._id, isActive: true })
+      .select('_id nama kode').lean();
+
+    if (!cabangs.length) {
+      return res.json({ success: true, data: [], total: 0 });
+    }
+
+    const cabangIds  = cabangs.map(c => c._id);
+    const cabangMap  = new Map(cabangs.map(c => [String(c._id), c]));
+    const cabangName = (id) => cabangMap.get(String(id))?.nama || '-';
+
+    const [subs, lowStock, voids, servicesPending, piutangs, closings] = await Promise.all([
+      // (a) Subscription expiring — hariTersisa <= 7
+      Subscription.find({
+        owner: owner._id,
+        cabang: { $in: cabangIds },
+        status: { $ne: 'gratis' },
+        expiredAt: { $ne: null, $lte: new Date(now.getTime() + 7 * 86400000) },
+      }).select('cabang status expiredAt').lean(),
+
+      // (b) Stok menipis — lintas semua cabang owner
+      Product.find({
+        cabang: { $in: cabangIds },
+        type: 'fisik',
+        isActive: true,
+        $expr: { $lte: ['$stock', { $ifNull: ['$minStock', 5] }] },
+      }).select('code name stock minStock cabang updatedAt').lean(),
+
+      // (c) Void besar — 7 hari terakhir, total > threshold
+      Transaction.find({
+        cabang: { $in: cabangIds },
+        isVoid: true,
+        total: { $gt: AMOUNT_THRESHOLD },
+        voidAt: { $gte: sevenDaysAgo },
+      }).select('invoiceNumber total voidAt voidReason voidByName cashierName cabang').lean(),
+
+      // (d) Service HP selesai belum diambil > 7 hari
+      ServiceTransaction.find({
+        cabang: { $in: cabangIds },
+        status: 'selesai',
+        isVoid: { $ne: true },
+        isArchived: { $ne: true },
+        updatedAt: { $lt: sevenDaysAgo },
+      }).select('invoiceNumber customerName deviceBrand deviceModel updatedAt cabang').lean(),
+
+      // (e) Piutang jatuh tempo — Finance.type='piutang', belum lunas.
+      // Dua kondisi (OR):
+      //  1. dueDate ada & sudah <= hari ini (jatuh tempo normal)
+      //  2. dueDate null tapi tanggal transaksi > 30 hari lalu — fallback
+      //     supaya piutang lama tanpa jatuh tempo eksplisit tetap ternotifikasi
+      Finance.find({
+        cabang: { $in: cabangIds },
+        type: 'piutang',
+        isPaid: false,
+        $or: [
+          { dueDate: { $ne: null, $lte: todayEndOfDay } },
+          { dueDate: null, date: { $lte: thirtyDaysAgo } },
+        ],
+      }).select('description amount dueDate date createdAt relatedParty cabang').lean(),
+
+      // (f) Selisih closing besar — 7 hari terakhir, statusSelisih='kurang', |selisih| > threshold
+      ClosingKas.find({
+        cabang: { $in: cabangIds },
+        type: 'cash',
+        statusSelisih: 'kurang',
+        tanggal: { $gte: sevenDaysAgo },
+        $expr: { $gt: [{ $abs: '$selisih' }, AMOUNT_THRESHOLD] },
+      }).select('tanggal selisih createdByName shift cabang').lean(),
+    ]);
+
+    const items = [];
+
+    // (a) Subscription
+    for (const s of subs) {
+      const hariTersisa = Math.ceil((new Date(s.expiredAt) - now) / 86400000);
+      const cNama = cabangName(s.cabang);
+      let severity = 'warning';
+      let title = `Subscription "${cNama}" akan expired`;
+      let message;
+      if (hariTersisa <= 0) {
+        severity = 'danger';
+        title = `Subscription "${cNama}" sudah expired`;
+        message = `Cabang berpotensi dinonaktifkan. Segera lakukan pembayaran.`;
+      } else if (hariTersisa <= 3) {
+        severity = 'danger';
+        message = `Sisa ${hariTersisa} hari. Segera lakukan pembayaran perpanjangan.`;
+      } else {
+        message = `Sisa ${hariTersisa} hari sebelum expired.`;
+      }
+      items.push({
+        id: `sub-${s.cabang}`,
+        type: 'subscription',
+        severity,
+        title,
+        message,
+        meta: { cabangId: s.cabang, cabangNama: cNama, expiredAt: s.expiredAt, hariTersisa },
+        createdAt: s.expiredAt,
+      });
+    }
+
+    // (b) Low stock — "menipis" adalah kondisi real-time saat endpoint
+    // dipanggil, bukan event historis. Jangan pakai Product.updatedAt
+    // (kapan produk terakhir diedit) — pakai `now` supaya urutan &
+    // waktu relatif ("baru saja") mencerminkan evaluasi saat ini.
+    for (const p of lowStock) {
+      items.push({
+        id: `stock-${p._id}`,
+        type: 'low_stock',
+        severity: p.stock === 0 ? 'danger' : 'warning',
+        title: `Stok menipis: ${p.name}`,
+        message: p.stock === 0
+          ? `Stok habis (0). Minimum: ${p.minStock}. Segera lakukan pembelian.`
+          : `Sisa ${p.stock} ${p.minStock ? `(min ${p.minStock})` : ''}. Perlu restock.`,
+        meta: {
+          cabangId: p.cabang, cabangNama: cabangName(p.cabang),
+          productId: p._id, code: p.code, stock: p.stock, minStock: p.minStock,
+        },
+        createdAt: now,
+      });
+    }
+
+    // (c) Void besar
+    for (const t of voids) {
+      items.push({
+        id: `void-${t._id}`,
+        type: 'void_besar',
+        severity: 'warning',
+        title: `Void transaksi besar: ${fmtRp(t.total)}`,
+        message: `${t.invoiceNumber} di "${cabangName(t.cabang)}" divoid oleh ${t.voidByName || '-'}. Alasan: ${t.voidReason || '-'}.`,
+        meta: {
+          cabangId: t.cabang, cabangNama: cabangName(t.cabang),
+          invoiceNumber: t.invoiceNumber, total: t.total,
+          voidByName: t.voidByName, voidReason: t.voidReason,
+        },
+        createdAt: t.voidAt,
+      });
+    }
+
+    // (d) Service belum diambil > 7 hari
+    for (const s of servicesPending) {
+      const hariMenunggu = Math.floor((now - new Date(s.updatedAt)) / 86400000);
+      const dev = [s.deviceBrand, s.deviceModel].filter(Boolean).join(' ') || 'unit';
+      items.push({
+        id: `service-${s._id}`,
+        type: 'service_pending',
+        severity: 'info',
+        title: `Service belum diambil > ${hariMenunggu} hari`,
+        message: `${s.invoiceNumber} — ${s.customerName} (${dev}) di "${cabangName(s.cabang)}" sudah selesai tapi belum diambil.`,
+        meta: {
+          cabangId: s.cabang, cabangNama: cabangName(s.cabang),
+          invoiceNumber: s.invoiceNumber, customerName: s.customerName,
+          hariMenunggu,
+        },
+        createdAt: s.updatedAt,
+      });
+    }
+
+    // (e) Piutang jatuh tempo
+    for (const f of piutangs) {
+      const hasDueDate = f.dueDate != null;
+      const refDate = hasDueDate ? new Date(f.dueDate) : new Date(f.date || f.createdAt);
+      const hariOverdue = Math.floor((now - refDate) / 86400000);
+      const partyStr = f.relatedParty ? ` (${f.relatedParty})` : '';
+      const cabangStr = `"${cabangName(f.cabang)}"`;
+      const desc = f.description || 'Piutang';
+      const message = hasDueDate
+        ? `${desc}${partyStr} di ${cabangStr} — ${hariOverdue > 0 ? `terlambat ${hariOverdue} hari` : 'jatuh tempo hari ini'}.`
+        : `${desc}${partyStr} di ${cabangStr} — belum dibayar ${hariOverdue} hari (tidak ada tanggal jatuh tempo).`;
+      items.push({
+        id: `piutang-${f._id}`,
+        type: 'piutang_jatuh_tempo',
+        severity: 'danger',
+        title: `Piutang jatuh tempo: ${fmtRp(f.amount)}`,
+        message,
+        meta: {
+          cabangId: f.cabang, cabangNama: cabangName(f.cabang),
+          amount: f.amount, dueDate: f.dueDate,
+          relatedParty: f.relatedParty, hariOverdue,
+        },
+        createdAt: refDate,
+      });
+    }
+
+    // (f) Selisih closing besar
+    for (const c of closings) {
+      items.push({
+        id: `closing-${c._id}`,
+        type: 'closing_selisih',
+        severity: 'danger',
+        title: `Selisih closing kas besar: ${fmtRp(Math.abs(c.selisih))}`,
+        message: `Shift ${c.shift} di "${cabangName(c.cabang)}" oleh ${c.createdByName || '-'} — selisih kurang ${fmtRp(Math.abs(c.selisih))}.`,
+        meta: {
+          cabangId: c.cabang, cabangNama: cabangName(c.cabang),
+          selisih: c.selisih, shift: c.shift, createdByName: c.createdByName,
+        },
+        createdAt: c.tanggal,
+      });
+    }
+
+    // Sort by createdAt DESC (newest first)
+    items.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+    res.json({ success: true, data: items, total: items.length });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

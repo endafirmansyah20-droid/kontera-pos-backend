@@ -27,6 +27,18 @@ exports.adminOnly = (req, res, next) => {
   next();
 };
 
+// Hanya untuk staff aktif di cabang (admin/karyawan). Dipakai fitur absensi:
+// owner/superadmin tidak ikut absen.
+exports.staffOnly = (req, res, next) => {
+  if (!['admin', 'karyawan'].includes(req.user?.role)) {
+    return res.status(403).json({ success: false, message: 'Hanya untuk admin/karyawan' });
+  }
+  if (!req.user?.cabang) {
+    return res.status(403).json({ success: false, message: 'Akun belum terhubung ke cabang' });
+  }
+  next();
+};
+
 exports.superAdminOnly = (req, res, next) => {
   if (req.user?.role !== 'superadmin') {
     return res.status(403).json({ success: false, message: 'Akses super admin diperlukan' });

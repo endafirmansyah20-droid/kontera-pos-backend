@@ -79,6 +79,7 @@ app.use('/api/backup',   require('./routes/backup'));
 app.use('/api/rewards',  require('./routes/rewards'));
 app.use('/api/member',   require('./routes/member'));
 app.use('/api/investor', require('./routes/investor'));
+app.use('/api/absensi',  require('./routes/absensi'));
 
 // Error handling
 app.use((err, req, res, next) => {

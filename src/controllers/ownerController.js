@@ -1803,6 +1803,7 @@ exports.getOwnerNotifications = async (req, res) => {
     const ServiceTransaction = require('../models/ServiceTransaction');
     const ClosingKas         = require('../models/ClosingKas');
     const Product            = require('../models/Product');
+    const Absensi            = require('../models/Absensi');
     const { Finance }        = require('../models');
 
     const owner = req.user;
@@ -1827,7 +1828,7 @@ exports.getOwnerNotifications = async (req, res) => {
     const cabangMap  = new Map(cabangs.map(c => [String(c._id), c]));
     const cabangName = (id) => cabangMap.get(String(id))?.nama || '-';
 
-    const [subs, lowStock, voids, servicesPending, piutangs, closings] = await Promise.all([
+    const [subs, lowStock, voids, servicesPending, piutangs, closings, pengajuanIzin] = await Promise.all([
       // (a) Subscription expiring — hariTersisa <= 7
       Subscription.find({
         owner: owner._id,
@@ -1884,6 +1885,15 @@ exports.getOwnerNotifications = async (req, res) => {
         tanggal: { $gte: sevenDaysAgo },
         $expr: { $gt: [{ $abs: '$selisih' }, AMOUNT_THRESHOLD] },
       }).select('tanggal selisih createdByName shift cabang').lean(),
+
+      // (g) Pengajuan izin/sakit/cuti yang belum di-approve
+      Absensi.find({
+        cabang: { $in: cabangIds },
+        status: { $in: ['izin', 'sakit', 'cuti'] },
+        approvalStatus: 'pending',
+      }).select('status tanggal keterangan user cabang createdAt')
+        .populate('user', 'name')
+        .lean(),
     ]);
 
     const items = [];
@@ -2012,6 +2022,27 @@ exports.getOwnerNotifications = async (req, res) => {
           selisih: c.selisih, shift: c.shift, createdByName: c.createdByName,
         },
         createdAt: c.tanggal,
+      });
+    }
+
+    // (g) Pengajuan izin/sakit/cuti menunggu approval
+    for (const p of pengajuanIzin) {
+      const userNama = p.user?.name || 'Karyawan';
+      const tglStr = new Date(p.tanggal).toLocaleDateString('id-ID', {
+        day: '2-digit', month: 'short', year: 'numeric',
+      });
+      items.push({
+        id: `izin-${p._id}`,
+        type: 'pengajuan_izin',
+        severity: 'info',
+        title: `Pengajuan ${p.status}: ${userNama}`,
+        message: `${userNama} di "${cabangName(p.cabang)}" mengajukan ${p.status} untuk ${tglStr}. ${p.keterangan ? `Alasan: ${p.keterangan}` : ''}`.trim(),
+        meta: {
+          cabangId: p.cabang, cabangNama: cabangName(p.cabang),
+          absensiId: p._id, userId: p.user?._id, userNama,
+          status: p.status, tanggal: p.tanggal, keterangan: p.keterangan,
+        },
+        createdAt: p.createdAt,
       });
     }
 

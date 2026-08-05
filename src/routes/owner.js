@@ -11,7 +11,20 @@ const {
   getPembelianRiwayat, getPembelianDetail, getOwnerReportsMonthly,
   getOwnerNotifications
 } = require('../controllers/ownerController');
+const {
+  ownerListAbsensi, ownerSummaryAbsensi, ownerDetailAbsensi,
+  ownerApproveAbsensi, ownerSetCabangLokasi,
+} = require('../controllers/absensiController');
 const { protect, superAdminOnly } = require('../middleware/auth');
+
+// Guard: hanya owner (bukan admin/karyawan) yang boleh akses endpoint /api/owner/*
+// Note: superadmin juga boleh (untuk debug/support).
+const ownerOnly = (req, res, next) => {
+  if (!['owner', 'superadmin'].includes(req.user?.role)) {
+    return res.status(403).json({ success: false, message: 'Akses owner diperlukan' });
+  }
+  next();
+};
 
 router.post('/register',                                           register);
 router.get('/dashboard',                          protect,         getDashboard);
@@ -39,6 +52,14 @@ router.get('/pembelian-riwayat',                  protect,         getPembelianR
 router.get('/pembelian/:id',                      protect,         getPembelianDetail);
 router.get('/reports/monthly',                    protect,         getOwnerReportsMonthly);
 router.get('/notifications',                      protect,         getOwnerNotifications);
+
+// ── Absensi (lintas cabang milik owner) ─────────────────────────────────────
+router.get('/absensi',                            protect, ownerOnly, ownerListAbsensi);
+router.get('/absensi/summary',                    protect, ownerOnly, ownerSummaryAbsensi);
+router.get('/absensi/:id',                        protect, ownerOnly, ownerDetailAbsensi);
+router.patch('/absensi/:id/approve',              protect, ownerOnly, ownerApproveAbsensi);
+router.patch('/cabang/:id/lokasi',                protect, ownerOnly, ownerSetCabangLokasi);
+
 // ── SuperAdmin ──────────────────────────────────────────────────────────────
 router.get('/subscriptions',                      protect, superAdminOnly, getAllSubscriptions);
 router.put('/subscriptions/:subscriptionId/konfirmasi', protect, superAdminOnly, konfirmasiPembayaran);

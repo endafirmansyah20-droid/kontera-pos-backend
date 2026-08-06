@@ -321,6 +321,185 @@ exports.getRiwayat = async (req, res) => {
   }
 };
 
+// ── Konstanta lembur ──────────────────────────────────────────────
+const LEMBUR_MAX_LOOKBACK_DAYS  = 30;   // hari lampau maksimum yang boleh diajukan
+const LEMBUR_MAX_DURASI_MENIT   = 12 * 60; // max 12 jam per klaim
+
+// ── POST /api/absensi/lembur ──────────────────────────────────────
+// Body: { tanggal (YYYY-MM-DD), jamMulai (ISO), jamSelesai (ISO), alasan }
+exports.ajukanLembur = async (req, res) => {
+  try {
+    const { tanggal, jamMulai, jamSelesai, alasan } = req.body;
+
+    if (!tanggal || !jamMulai || !jamSelesai || !alasan) {
+      return res.status(400).json({ success: false, message: 'tanggal, jamMulai, jamSelesai, alasan wajib diisi' });
+    }
+    const alasanTrim = String(alasan).trim();
+    if (!alasanTrim) {
+      return res.status(400).json({ success: false, message: 'Alasan wajib diisi' });
+    }
+    if (alasanTrim.length > 500) {
+      return res.status(400).json({ success: false, message: 'Alasan maksimal 500 karakter' });
+    }
+
+    const tglParsed = new Date(tanggal);
+    if (isNaN(tglParsed.getTime())) {
+      return res.status(400).json({ success: false, message: 'Tanggal tidak valid' });
+    }
+    const jm = new Date(jamMulai);
+    const js = new Date(jamSelesai);
+    if (isNaN(jm.getTime()) || isNaN(js.getTime())) {
+      return res.status(400).json({ success: false, message: 'jamMulai/jamSelesai tidak valid' });
+    }
+    if (js <= jm) {
+      return res.status(400).json({ success: false, message: 'jamSelesai harus setelah jamMulai' });
+    }
+
+    // Catatan: jamSelesai boleh di masa depan (dalam hari yang sama). Contoh:
+    // karyawan submit jam 21:00 untuk lembur yang akan berakhir jam 23:00.
+    // Guard "tanggal tidak boleh future" di bawah sudah cegah abuse tanggal besok.
+
+    const durasiMenit = Math.round((js - jm) / 60000);
+    if (durasiMenit <= 0) {
+      return res.status(400).json({ success: false, message: 'Durasi lembur tidak valid' });
+    }
+    if (durasiMenit > LEMBUR_MAX_DURASI_MENIT) {
+      return res.status(400).json({
+        success: false,
+        message: `Durasi lembur maksimal ${LEMBUR_MAX_DURASI_MENIT / 60} jam per klaim`,
+      });
+    }
+
+    const tanggalNorm = normalizeTanggalWIB(tglParsed);
+    // Retroactive lookback guard — hitung selisih hari kalender WIB
+    const todayNorm = normalizeTanggalWIB();
+    const lookbackDays = Math.floor((todayNorm - tanggalNorm) / 86400000);
+    if (lookbackDays < 0) {
+      return res.status(400).json({ success: false, message: 'Lembur tidak boleh diajukan untuk hari yang belum tiba' });
+    }
+    if (lookbackDays > LEMBUR_MAX_LOOKBACK_DAYS) {
+      return res.status(400).json({
+        success: false,
+        message: `Lembur hanya bisa diajukan maksimal ${LEMBUR_MAX_LOOKBACK_DAYS} hari ke belakang`,
+      });
+    }
+
+    const user = req.user;
+    const doc = await Absensi.findOne({ user: user._id, tanggal: tanggalNorm });
+    if (!doc) {
+      return res.status(400).json({
+        success: false,
+        message: 'Tidak ada catatan absensi untuk tanggal tersebut. Lembur hanya bisa diajukan pada hari yang Anda hadir.',
+      });
+    }
+    if (doc.status !== 'hadir') {
+      return res.status(400).json({
+        success: false,
+        message: `Anda berstatus ${doc.status} di tanggal tersebut, tidak bisa mengajukan lembur`,
+      });
+    }
+
+    // Guard: hanya 1 lembur aktif (pending/disetujui) per tanggal
+    const adaAktif = (doc.lembur || []).some(l => l.approvalStatus === 'pending' || l.approvalStatus === 'disetujui');
+    if (adaAktif) {
+      return res.status(409).json({
+        success: false,
+        message: 'Sudah ada pengajuan lembur aktif untuk tanggal ini. Batalkan/tolak dulu sebelum ajukan baru.',
+      });
+    }
+
+    doc.lembur.push({
+      jamMulai: jm,
+      jamSelesai: js,
+      durasiMenit,
+      alasan: alasanTrim,
+      approvalStatus: 'pending',
+    });
+    await doc.save();
+
+    const created = doc.lembur[doc.lembur.length - 1];
+
+    // Notify owner via socket
+    req.app.get('io')?.emit('lembur:new-pengajuan', {
+      cabang: doc.cabang,
+      user: user._id,
+      userName: user.name,
+      absensiId: doc._id,
+      lemburId: created._id,
+      tanggal: doc.tanggal,
+      durasiMenit,
+    });
+
+    res.status(201).json({
+      success: true,
+      message: 'Pengajuan lembur dikirim, menunggu persetujuan Owner',
+      data: { absensiId: doc._id, lembur: created },
+    });
+  } catch (err) {
+    console.error('[absensi.ajukanLembur]', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── GET /api/absensi/lembur/riwayat ───────────────────────────────
+// Query: ?bulan=YYYY-MM (default: bulan berjalan)
+exports.getRiwayatLembur = async (req, res) => {
+  try {
+    const now = new Date();
+    let startDate, endDate;
+    if (req.query.bulan) {
+      const m = String(req.query.bulan).match(/^(\d{4})-(\d{2})$/);
+      if (!m) return res.status(400).json({ success: false, message: 'Format bulan harus YYYY-MM' });
+      const y = parseInt(m[1], 10);
+      const mo = parseInt(m[2], 10) - 1;
+      startDate = normalizeTanggalWIB(new Date(y, mo, 1));
+      endDate   = normalizeTanggalWIB(new Date(y, mo + 1, 1));
+    } else {
+      startDate = normalizeTanggalWIB(new Date(now.getFullYear(), now.getMonth(), 1));
+      endDate   = normalizeTanggalWIB(new Date(now.getFullYear(), now.getMonth() + 1, 1));
+    }
+
+    const rows = await Absensi.find({
+      user: req.user._id,
+      tanggal: { $gte: startDate, $lt: endDate },
+      'lembur.0': { $exists: true },
+    }).sort('-tanggal').lean();
+
+    // Flatten ke entri lembur + rekap
+    const items = [];
+    const rekap = { pending: 0, disetujui: 0, ditolak: 0, totalMenitDisetujui: 0 };
+    for (const r of rows) {
+      for (const l of (r.lembur || [])) {
+        items.push({
+          _id: l._id,
+          absensiId: r._id,
+          tanggal: r.tanggal,
+          jamMulai: l.jamMulai,
+          jamSelesai: l.jamSelesai,
+          durasiMenit: l.durasiMenit,
+          alasan: l.alasan,
+          approvalStatus: l.approvalStatus,
+          approvedAt: l.approvedAt,
+          alasanTolak: l.alasanTolak,
+          createdAt: l.createdAt,
+        });
+        rekap[l.approvalStatus] = (rekap[l.approvalStatus] || 0) + 1;
+        if (l.approvalStatus === 'disetujui') rekap.totalMenitDisetujui += (l.durasiMenit || 0);
+      }
+    }
+    // Sort by createdAt DESC
+    items.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+    res.json({
+      success: true,
+      data: items,
+      rekap: { ...rekap, totalJamDisetujui: Number((rekap.totalMenitDisetujui / 60).toFixed(2)) },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 // ══════════════════════════════════════════════════════════════════
 // OWNER ENDPOINTS
 // ══════════════════════════════════════════════════════════════════
@@ -406,7 +585,10 @@ exports.ownerListAbsensi = async (req, res) => {
 
 // ── GET /api/owner/absensi/summary ────────────────────────────────
 // Rekap per cabang untuk periode tertentu (default: bulan berjalan).
-// Query: ?bulan=YYYY-MM atau ?startDate=&endDate=
+// Query:
+//   ?bulan=YYYY-MM atau ?startDate=&endDate=
+//   ?cabang=<id>  — scope ke 1 cabang
+//   ?user=<id>    — mode per-karyawan (output rekap user tsb + lembur breakdown)
 exports.ownerSummaryAbsensi = async (req, res) => {
   try {
     const owner = req.user;
@@ -430,20 +612,96 @@ exports.ownerSummaryAbsensi = async (req, res) => {
       endDate   = normalizeTanggalWIB(new Date(now.getFullYear(), now.getMonth() + 1, 1));
     }
 
-    const perCabang = await Absensi.aggregate([
-      { $match: { cabang: { $in: scope.ids }, tanggal: { $gte: startDate, $lt: endDate } } },
-      { $group: {
-          _id: { cabang: '$cabang', status: '$status' },
-          count: { $sum: 1 },
-      }},
+    // ── Mode per-karyawan ─────────────────────────────────────────
+    if (req.query.user) {
+      if (!mongoose.isValidObjectId(req.query.user)) {
+        return res.status(400).json({ success: false, message: 'User tidak valid' });
+      }
+      const userId = new mongoose.Types.ObjectId(req.query.user);
+
+      // Authz: user harus punya absensi di cabang milik owner (histori kerja apapun)
+      const userDoc = await User.findOne({ _id: userId, cabang: { $in: scope.ids } })
+        .select('name username role cabang').lean();
+      const hasHistori = userDoc || await Absensi.exists({ user: userId, cabang: { $in: scope.ids } });
+      if (!hasHistori) {
+        return res.status(403).json({ success: false, message: 'Karyawan bukan bagian dari cabang Anda' });
+      }
+
+      const matchUser = {
+        user: userId,
+        cabang: { $in: scope.ids },
+        tanggal: { $gte: startDate, $lt: endDate },
+      };
+
+      const [statusAgg, lemburAgg] = await Promise.all([
+        Absensi.aggregate([
+          { $match: matchUser },
+          { $group: { _id: '$status', count: { $sum: 1 } } },
+        ]),
+        Absensi.aggregate([
+          { $match: matchUser },
+          { $unwind: '$lembur' },
+          { $group: {
+              _id: '$lembur.approvalStatus',
+              count: { $sum: 1 },
+              totalMenit: { $sum: '$lembur.durasiMenit' },
+          }},
+        ]),
+      ]);
+
+      const rekap = { hadir: 0, izin: 0, sakit: 0, cuti: 0, total: 0 };
+      for (const r of statusAgg) {
+        rekap[r._id] = r.count;
+        rekap.total += r.count;
+      }
+      const lembur = {
+        pending: 0, disetujui: 0, ditolak: 0,
+        totalMenitDisetujui: 0, totalJamLembur: 0,
+      };
+      for (const r of lemburAgg) {
+        if (!r._id) continue;
+        lembur[r._id] = r.count;
+        if (r._id === 'disetujui') lembur.totalMenitDisetujui = r.totalMenit || 0;
+      }
+      lembur.totalJamLembur = Number((lembur.totalMenitDisetujui / 60).toFixed(2));
+
+      return res.json({
+        success: true,
+        startDate, endDate,
+        user: userDoc || { _id: userId },
+        rekap: { ...rekap, lembur },
+      });
+    }
+
+    // ── Mode per-cabang (default) ────────────────────────────────
+    const [perCabang, lemburPerCabang] = await Promise.all([
+      Absensi.aggregate([
+        { $match: { cabang: { $in: scope.ids }, tanggal: { $gte: startDate, $lt: endDate } } },
+        { $group: {
+            _id: { cabang: '$cabang', status: '$status' },
+            count: { $sum: 1 },
+        }},
+      ]),
+      Absensi.aggregate([
+        { $match: { cabang: { $in: scope.ids }, tanggal: { $gte: startDate, $lt: endDate } } },
+        { $unwind: '$lembur' },
+        { $match: { 'lembur.approvalStatus': 'disetujui' } },
+        { $group: {
+            _id: '$cabang',
+            totalMenit: { $sum: '$lembur.durasiMenit' },
+            count: { $sum: 1 },
+        }},
+      ]),
     ]);
 
-    const cabangMap = new Map(scope.all.map(c => [String(c._id), c]));
     const summary = scope.all.map(c => ({
       cabangId: c._id,
       cabangNama: c.nama,
       cabangKode: c.kode,
       hadir: 0, izin: 0, sakit: 0, cuti: 0, total: 0,
+      lemburDisetujuiCount: 0,
+      totalMenitLembur: 0,
+      totalJamLembur: 0,
     }));
     const summaryByCabang = new Map(summary.map(s => [String(s.cabangId), s]));
 
@@ -453,18 +711,32 @@ exports.ownerSummaryAbsensi = async (req, res) => {
       s[row._id.status] = row.count;
       s.total += row.count;
     }
+    for (const row of lemburPerCabang) {
+      const s = summaryByCabang.get(String(row._id));
+      if (!s) continue;
+      s.lemburDisetujuiCount = row.count;
+      s.totalMenitLembur = row.totalMenit || 0;
+      s.totalJamLembur = Number((s.totalMenitLembur / 60).toFixed(2));
+    }
 
-    // Global pending approvals count (untuk badge)
-    const pendingCount = await Absensi.countDocuments({
-      cabang: { $in: scope.ids },
-      approvalStatus: 'pending',
-    });
+    // Global pending counts (untuk badge)
+    const [pendingCount, lemburPendingCount] = await Promise.all([
+      Absensi.countDocuments({
+        cabang: { $in: scope.ids },
+        approvalStatus: 'pending',
+      }),
+      Absensi.countDocuments({
+        cabang: { $in: scope.ids },
+        'lembur.approvalStatus': 'pending',
+      }),
+    ]);
 
     res.json({
       success: true,
       startDate, endDate,
       summary,
       pendingCount,
+      lemburPendingCount,
     });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -535,6 +807,59 @@ exports.ownerApproveAbsensi = async (req, res) => {
 
     res.json({ success: true, message: `Pengajuan ${doc.approvalStatus}`, data: doc });
   } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── PATCH /api/owner/absensi/lembur/:lemburId/approve ────────────
+// Body: { approve: true|false, alasanTolak?: string }
+exports.ownerApproveLembur = async (req, res) => {
+  try {
+    const { lemburId } = req.params;
+    const { approve, alasanTolak } = req.body;
+    if (typeof approve !== 'boolean') {
+      return res.status(400).json({ success: false, message: 'Field approve (boolean) wajib' });
+    }
+    if (!mongoose.isValidObjectId(lemburId)) {
+      return res.status(400).json({ success: false, message: 'lemburId tidak valid' });
+    }
+
+    // Cari parent Absensi via subdoc _id
+    const doc = await Absensi.findOne({ 'lembur._id': lemburId })
+      .populate('cabang', 'owner nama');
+    if (!doc) return res.status(404).json({ success: false, message: 'Pengajuan lembur tidak ditemukan' });
+
+    if (!doc.cabang?.owner || String(doc.cabang.owner) !== String(req.user._id)) {
+      return res.status(403).json({ success: false, message: 'Bukan cabang milik Anda' });
+    }
+
+    const sub = doc.lembur.id(lemburId);
+    if (!sub) return res.status(404).json({ success: false, message: 'Pengajuan lembur tidak ditemukan' });
+    if (sub.approvalStatus !== 'pending') {
+      return res.status(409).json({ success: false, message: `Sudah ${sub.approvalStatus}` });
+    }
+
+    sub.approvalStatus = approve ? 'disetujui' : 'ditolak';
+    sub.approvedBy     = req.user._id;
+    sub.approvedAt     = new Date();
+    if (!approve) sub.alasanTolak = String(alasanTolak || '').trim();
+    await doc.save();
+
+    // Notify user via socket
+    req.app.get('io')?.emit('lembur:approval', {
+      absensiId: doc._id,
+      lemburId: sub._id,
+      user: doc.user,
+      approvalStatus: sub.approvalStatus,
+    });
+
+    res.json({
+      success: true,
+      message: `Pengajuan lembur ${sub.approvalStatus}`,
+      data: { absensiId: doc._id, lembur: sub },
+    });
+  } catch (err) {
+    console.error('[absensi.ownerApproveLembur]', err);
     res.status(500).json({ success: false, message: err.message });
   }
 };

@@ -3,7 +3,7 @@ const router  = express.Router();
 const {
   register, getDashboard, requestTambahCabang,
   getAllSubscriptions, konfirmasiPembayaran, checkExpired,
-  getUsers, tambahUser, toggleUser, editUser, resetUserPassword,
+  getUsers, getUserDetail, tambahUser, toggleUser, editUser, resetUserPassword,
   getEmployeeStats, getEmployeeTransactions, getCabangSummary, getRecentActivity,
   getHourlyChart, getDashboardWidgets, getPenjualanAnalytics, toggleCabang,
   getServiceSummary, getServiceList, getServiceDetail, getServiceAnalytics,
@@ -13,7 +13,7 @@ const {
 } = require('../controllers/ownerController');
 const {
   ownerListAbsensi, ownerSummaryAbsensi, ownerDetailAbsensi,
-  ownerApproveAbsensi, ownerSetCabangLokasi,
+  ownerApproveAbsensi, ownerSetCabangLokasi, ownerApproveLembur,
 } = require('../controllers/absensiController');
 const { protect, superAdminOnly } = require('../middleware/auth');
 
@@ -31,6 +31,7 @@ router.get('/dashboard',                          protect,         getDashboard)
 router.post('/tambah-cabang',                     protect,         requestTambahCabang);
 router.patch('/cabang/:cabangId/toggle',          protect,         toggleCabang);
 router.get('/users',                              protect,         getUsers);
+router.get('/users/:userId',                      protect,         getUserDetail);
 router.post('/users',                             protect,         tambahUser);
 router.patch('/users/:userId/toggle',             protect,         toggleUser);
 router.put('/users/:userId',                      protect,         editUser);
@@ -56,6 +57,7 @@ router.get('/notifications',                      protect,         getOwnerNotif
 // ── Absensi (lintas cabang milik owner) ─────────────────────────────────────
 router.get('/absensi',                            protect, ownerOnly, ownerListAbsensi);
 router.get('/absensi/summary',                    protect, ownerOnly, ownerSummaryAbsensi);
+router.patch('/absensi/lembur/:lemburId/approve', protect, ownerOnly, ownerApproveLembur);
 router.get('/absensi/:id',                        protect, ownerOnly, ownerDetailAbsensi);
 router.patch('/absensi/:id/approve',              protect, ownerOnly, ownerApproveAbsensi);
 router.patch('/cabang/:id/lokasi',                protect, ownerOnly, ownerSetCabangLokasi);

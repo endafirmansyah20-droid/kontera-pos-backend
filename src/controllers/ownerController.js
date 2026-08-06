@@ -244,56 +244,6 @@ exports.getUsers = async (req, res) => {
     const owner = req.user;
     const cabangs = await Cabang.find({ owner: owner._id }).select('_id');
     const cabangIds = cabangs.map(c => c._id);
-    const users = await User.find({
-      cabang: { $in: cabangIds },
-      role: { $in: ['admin', 'karyawan'] }
-    }).populate('cabang', 'nama kode').sort('-createdAt');
-    res.json({ success: true, data: users });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-};
-
-exports.tambahUser = async (req, res) => {
-  try {
-    const owner = req.user;
-    const { name, username, password, role, cabangId } = req.body;
-    if (!name || !username || !password || !cabangId)
-      return res.status(400).json({ success: false, message: 'Semua field wajib diisi' });
-    const cabang = await Cabang.findOne({ _id: cabangId, owner: owner._id });
-    if (!cabang) return res.status(403).json({ success: false, message: 'Cabang bukan milik kamu' });
-    const sub = await Subscription.findOne({ cabang: cabangId, status: { $in: ['aktif','gratis'] } });
-    if (!sub) return res.status(403).json({ success: false, message: 'Cabang belum aktif' });
-    const exists = await User.findOne({ username });
-    if (exists) return res.status(400).json({ success: false, message: 'Username sudah digunakan' });
-    const user = await User.create({ name, username, password, role: role || 'karyawan', cabang: cabangId });
-    const populated = await User.findById(user._id).populate('cabang', 'nama kode');
-    res.status(201).json({ success: true, message: 'User berhasil ditambahkan', data: populated });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-};
-
-exports.toggleUser = async (req, res) => {
-  try {
-    const owner = req.user;
-    const user = await User.findById(req.params.userId).populate('cabang');
-    if (!user) return res.status(404).json({ success: false, message: 'User tidak ditemukan' });
-    const cabang = await Cabang.findOne({ _id: user.cabang._id, owner: owner._id });
-    if (!cabang) return res.status(403).json({ success: false, message: 'Akses ditolak' });
-    user.isActive = !user.isActive;
-    await user.save();
-    res.json({ success: true, message: `User ${user.isActive ? 'diaktifkan' : 'dinonaktifkan'}`, data: user });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-};
-
-exports.getUsers = async (req, res) => {
-  try {
-    const owner = req.user;
-    const cabangs = await Cabang.find({ owner: owner._id }).select('_id');
-    const cabangIds = cabangs.map(c => c._id);
 
     // Filter opsional per cabang (pattern sama dgn getEmployeeStats)
     let cabangFilter;
@@ -311,6 +261,39 @@ exports.getUsers = async (req, res) => {
     const users = await User.find({ cabang: cabangFilter, role: { $in: ['admin','karyawan'] } }).populate('cabang','nama kode').sort('-createdAt');
     res.json({ success: true, data: users });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+};
+
+// ── Get Single User by ID (Owner) ────────────────────────────────
+// Untuk halaman detail karyawan — deep link / refresh page ke
+// /owner/karyawan/:userId. Authz: user.cabang harus salah satu cabang owner.
+exports.getUserDetail = async (req, res) => {
+  try {
+    const owner = req.user;
+    const { userId } = req.params;
+    if (!mongoose.isValidObjectId(userId)) {
+      return res.status(400).json({ success: false, message: 'User tidak valid' });
+    }
+
+    const user = await User.findById(userId).populate('cabang', 'nama kode');
+    if (!user) return res.status(404).json({ success: false, message: 'User tidak ditemukan' });
+
+    // Hanya admin/karyawan yang boleh dilihat via endpoint ini (bukan owner sendiri)
+    if (!['admin', 'karyawan'].includes(user.role)) {
+      return res.status(403).json({ success: false, message: 'Akses ditolak' });
+    }
+
+    // Cabang harus milik owner
+    const currentCabangId = user.cabang?._id || user.cabang;
+    if (!currentCabangId) {
+      return res.status(403).json({ success: false, message: 'User tidak punya cabang' });
+    }
+    const owned = await Cabang.exists({ _id: currentCabangId, owner: owner._id });
+    if (!owned) return res.status(403).json({ success: false, message: 'Bukan karyawan cabang Anda' });
+
+    res.json({ success: true, data: user });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
 };
 
 exports.tambahUser = async (req, res) => {
@@ -434,6 +417,15 @@ exports.getEmployeeStats = async (req, res) => {
       cabangFilter = { cabang: { $in: cabangIds } };
     }
 
+    // Filter opsional per cashier (untuk halaman detail karyawan owner)
+    let cashierMatch = { cashier: { $ne: null } };
+    if (req.query.cashier) {
+      if (!mongoose.isValidObjectId(req.query.cashier)) {
+        return res.status(400).json({ success: false, message: 'Cashier tidak valid' });
+      }
+      cashierMatch = { cashier: new mongoose.Types.ObjectId(req.query.cashier) };
+    }
+
     // Periode: today | 7 | 30 | month (default 'month' backward-compatible)
     const range = String(req.query.range || 'month').toLowerCase();
     const now = new Date();
@@ -451,10 +443,10 @@ exports.getEmployeeStats = async (req, res) => {
     const stats = await Transaction.aggregate([
       { $match: {
           ...cabangFilter,
+          ...cashierMatch,
           type: 'penjualan',
           isVoid: { $ne: true },
           transactionDate: { $gte: startDate, $lte: endDate },
-          cashier: { $ne: null }
       }},
       { $group: {
           _id: '$cashier',
@@ -1828,7 +1820,7 @@ exports.getOwnerNotifications = async (req, res) => {
     const cabangMap  = new Map(cabangs.map(c => [String(c._id), c]));
     const cabangName = (id) => cabangMap.get(String(id))?.nama || '-';
 
-    const [subs, lowStock, voids, servicesPending, piutangs, closings, pengajuanIzin] = await Promise.all([
+    const [subs, lowStock, voids, servicesPending, piutangs, closings, pengajuanIzin, pengajuanLembur] = await Promise.all([
       // (a) Subscription expiring — hariTersisa <= 7
       Subscription.find({
         owner: owner._id,
@@ -1892,6 +1884,14 @@ exports.getOwnerNotifications = async (req, res) => {
         status: { $in: ['izin', 'sakit', 'cuti'] },
         approvalStatus: 'pending',
       }).select('status tanggal keterangan user cabang createdAt')
+        .populate('user', 'name')
+        .lean(),
+
+      // (h) Pengajuan lembur pending — Absensi yang punya subdoc lembur pending
+      Absensi.find({
+        cabang: { $in: cabangIds },
+        'lembur.approvalStatus': 'pending',
+      }).select('tanggal lembur user cabang')
         .populate('user', 'name')
         .lean(),
     ]);
@@ -2044,6 +2044,39 @@ exports.getOwnerNotifications = async (req, res) => {
         },
         createdAt: p.createdAt,
       });
+    }
+
+    // (h) Pengajuan lembur menunggu approval — 1 item per subdoc pending
+    const fmtJam = (d) => new Date(d).toLocaleTimeString('id-ID', {
+      hour: '2-digit', minute: '2-digit', hour12: false,
+    });
+    for (const a of pengajuanLembur) {
+      const userNama = a.user?.name || 'Karyawan';
+      const tglStr = new Date(a.tanggal).toLocaleDateString('id-ID', {
+        day: '2-digit', month: 'short', year: 'numeric',
+      });
+      for (const l of (a.lembur || [])) {
+        if (l.approvalStatus !== 'pending') continue;
+        const jamStr = `${fmtJam(l.jamMulai)}–${fmtJam(l.jamSelesai)}`;
+        const durasiJam = (l.durasiMenit / 60).toFixed(1).replace(/\.0$/, '');
+        items.push({
+          id: `lembur-${l._id}`,
+          type: 'pengajuan_lembur',
+          severity: 'info',
+          title: `Pengajuan lembur: ${userNama}`,
+          message: `${userNama} di "${cabangName(a.cabang)}" mengajukan lembur ${jamStr} (${durasiJam} jam) tanggal ${tglStr}.${l.alasan ? ` Alasan: ${l.alasan}` : ''}`,
+          meta: {
+            cabangId: a.cabang, cabangNama: cabangName(a.cabang),
+            absensiId: a._id, lemburId: l._id,
+            userId: a.user?._id, userNama,
+            tanggal: a.tanggal,
+            jamMulai: l.jamMulai, jamSelesai: l.jamSelesai,
+            durasiMenit: l.durasiMenit,
+            alasan: l.alasan,
+          },
+          createdAt: l.createdAt,
+        });
+      }
     }
 
     // Sort by createdAt DESC (newest first)

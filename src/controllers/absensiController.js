@@ -835,14 +835,23 @@ exports.ownerApproveLembur = async (req, res) => {
 
     const sub = doc.lembur.id(lemburId);
     if (!sub) return res.status(404).json({ success: false, message: 'Pengajuan lembur tidak ditemukan' });
-    if (sub.approvalStatus !== 'pending') {
-      return res.status(409).json({ success: false, message: `Sudah ${sub.approvalStatus}` });
+
+    const current = sub.approvalStatus;
+    if (approve && current === 'disetujui') {
+      return res.status(409).json({ success: false, message: 'Lembur sudah disetujui' });
+    }
+    if (!approve && current === 'ditolak') {
+      return res.status(409).json({ success: false, message: 'Lembur sudah ditolak' });
     }
 
     sub.approvalStatus = approve ? 'disetujui' : 'ditolak';
     sub.approvedBy     = req.user._id;
     sub.approvedAt     = new Date();
-    if (!approve) sub.alasanTolak = String(alasanTolak || '').trim();
+    if (!approve) {
+      sub.alasanTolak = String(alasanTolak || '').trim();
+    } else {
+      sub.alasanTolak = undefined;
+    }
     await doc.save();
 
     // Notify user via socket

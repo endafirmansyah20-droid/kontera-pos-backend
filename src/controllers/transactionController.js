@@ -21,6 +21,8 @@ async function deductStockFIFO(product, qty) {
     }];
   }
 
+  product.stockBatches.sort((a, b) => new Date(a.receivedDate) - new Date(b.receivedDate));
+
   let remaining = qty;
   let totalCost = 0;
   let totalQty  = 0;

@@ -20,6 +20,16 @@ const serviceTransactionSchema = new mongoose.Schema({
   diagnosis:     { type: String, trim: true, default: '' },    // Diagnosa teknisi
   workDone:      { type: String, trim: true, default: '' },    // Pekerjaan yang dilakukan
 
+  // ── Item sparepart (dari stok atau beli eksternal) ─────────
+  sparepartItems: [{
+    sparepartId: { type: mongoose.Schema.Types.ObjectId, ref: 'SparePartStock', default: null },
+    name:        { type: String, required: true },
+    qty:         { type: Number, required: true, min: 1 },
+    hargaBeli:   { type: Number, required: true, min: 0 },
+    hargaJual:   { type: Number, required: true, min: 0 },
+    source:      { type: String, enum: ['stok', 'eksternal'], required: true },
+  }],
+
   // ── Biaya ──────────────────────────────────────────────────
   partsCost:     { type: Number, default: 0 },  // Biaya sparepart / bahan
   serviceFee:    { type: Number, default: 0 },  // Biaya jasa
@@ -68,8 +78,13 @@ serviceTransactionSchema.pre('save', async function (next) {
   next();
 });
 
-// Auto-hitung totalCost & profit sebelum save
+// Auto-hitung partsCost dari sparepartItems (kalau ada), lalu totalCost & profit
 serviceTransactionSchema.pre('save', function (next) {
+  if (Array.isArray(this.sparepartItems) && this.sparepartItems.length > 0) {
+    this.partsCost = this.sparepartItems.reduce(
+      (sum, item) => sum + ((item.hargaJual || 0) * (item.qty || 0)), 0
+    );
+  }
   this.totalCost = this.serviceFee || 0;           // Total bayar pelanggan = Biaya Service HP
   this.profit    = (this.serviceFee || 0) - (this.partsCost || 0); // Laba = Service - Sparepart
   next();

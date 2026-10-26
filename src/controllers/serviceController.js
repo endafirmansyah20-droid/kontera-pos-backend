@@ -1,6 +1,8 @@
+const mongoose           = require('mongoose');
 const ServiceTransaction = require('../models/ServiceTransaction');
 const ServiceFinance     = require('../models/ServiceFinance');
 const ServiceClosing     = require('../models/ServiceClosing');
+const SparePartStock     = require('../models/SparePartStock');
 const { Customer, Settings } = require('../models/index');
 
 // ─── Status label ─────────────────────────────────────────────────────────
@@ -69,12 +71,41 @@ exports.getOne = async (req, res) => {
 
 // POST /api/service — buat transaksi servis baru
 exports.create = async (req, res) => {
+  const session = await mongoose.startSession();
   try {
     const cabangId = req.user.role === 'superadmin' ? (req.body.cabang || null) : (req.user.cabang?._id || req.user.cabang || null);
-    const doc = new ServiceTransaction({ ...req.body, createdBy: req.user._id, cabang: cabangId });
-    await doc.save();
-    res.status(201).json({ success: true, data: doc });
-  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+    let saved;
+
+    await session.withTransaction(async () => {
+      const doc = new ServiceTransaction({ ...req.body, createdBy: req.user._id, cabang: cabangId });
+
+      const items = Array.isArray(req.body.sparepartItems) ? req.body.sparepartItems : [];
+      for (const item of items) {
+        if (item.source !== 'stok') continue;
+        if (!item.sparepartId) throw new Error('sparepartId wajib untuk item dari stok');
+
+        const sp = await SparePartStock.findById(item.sparepartId).session(session);
+        if (!sp) throw new Error(`Sparepart tidak ditemukan`);
+        if (cabangId && String(sp.cabang) !== String(cabangId)) {
+          throw new Error(`Sparepart ${sp.nama} bukan milik cabang ini`);
+        }
+        if ((sp.stok || 0) < item.qty) {
+          throw new Error(`Stok sparepart ${sp.nama} tidak mencukupi (tersedia ${sp.stok})`);
+        }
+        sp.stok -= item.qty;
+        await sp.save({ session });
+      }
+
+      await doc.save({ session });
+      saved = doc;
+    });
+
+    res.status(201).json({ success: true, data: saved });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  } finally {
+    session.endSession();
+  }
 };
 
 // PUT /api/service/:id — update (termasuk ganti status)
@@ -117,28 +148,50 @@ exports.update = async (req, res) => {
 
 // DELETE /api/service/:id — void (admin only)
 exports.voidService = async (req, res) => {
+  const session = await mongoose.startSession();
   try {
-    const doc = await ServiceTransaction.findById(req.params.id);
-    if (!doc) return res.status(404).json({ success: false, message: 'Tidak ditemukan' });
+    let notFound = false;
 
-    // Cabut poin member jika transaksi sudah diambil & ada customerId
-    if (doc.status === 'diambil' && doc.customerId) {
-      try {
-        const settings   = await Settings.findOne({ cabang: doc.cabang });
-        const pointPer   = settings?.pointSettings?.pointPerRupiah || 50;
-        const earnPoints = Math.floor(doc.totalCost / pointPer);
-        if (earnPoints > 0) {
-          await Customer.findByIdAndUpdate(doc.customerId, {
-            $inc: { points: -earnPoints, totalPoints: -earnPoints }
-          });
+    await session.withTransaction(async () => {
+      const doc = await ServiceTransaction.findById(req.params.id).session(session);
+      if (!doc) { notFound = true; return; }
+
+      // Cabut poin member jika transaksi sudah diambil & ada customerId
+      if (doc.status === 'diambil' && doc.customerId) {
+        try {
+          const settings   = await Settings.findOne({ cabang: doc.cabang }).session(session);
+          const pointPer   = settings?.pointSettings?.pointPerRupiah || 50;
+          const earnPoints = Math.floor(doc.totalCost / pointPer);
+          if (earnPoints > 0) {
+            await Customer.findByIdAndUpdate(doc.customerId, {
+              $inc: { points: -earnPoints, totalPoints: -earnPoints }
+            }, { session });
+          }
+        } catch(e) { console.error('Gagal cabut poin service:', e.message); }
+      }
+
+      // Restore stok sparepart yang sumbernya dari stok
+      const items = Array.isArray(doc.sparepartItems) ? doc.sparepartItems : [];
+      for (const item of items) {
+        if (item.source !== 'stok' || !item.sparepartId) continue;
+        const sp = await SparePartStock.findById(item.sparepartId).session(session);
+        if (sp) {
+          sp.stok = (sp.stok || 0) + item.qty;
+          await sp.save({ session });
         }
-      } catch(e) { console.error('Gagal cabut poin service:', e.message); }
-    }
+      }
 
-    doc.isVoid = true;
-    await doc.save();
+      doc.isVoid = true;
+      await doc.save({ session });
+    });
+
+    if (notFound) return res.status(404).json({ success: false, message: 'Tidak ditemukan' });
     res.json({ success: true, message: 'Transaksi dibatalkan' });
-  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  } finally {
+    session.endSession();
+  }
 };
 
 // ══════════════════════════════════════════════════════════════════════════

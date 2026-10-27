@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const SparePartStock = require('../models/SparePartStock');
+const SparePartLog   = require('../models/SparePartLog');
 const Cabang = require('../models/Cabang');
 
 // Resolver cabang untuk create: superadmin dari body, owner validate ownership, lainnya dari user.cabang
@@ -59,24 +60,48 @@ exports.getSparepart = async (req, res) => {
 
 // POST /api/sparepart
 exports.createSparepart = async (req, res) => {
+  const session = await mongoose.startSession();
   try {
     const cabangId = await resolveCabangForCreate(req);
     if (!cabangId) return res.status(400).json({ success: false, message: 'Cabang wajib diisi' });
 
     const { nama, kategori, hargaBeli, hargaJual, stok, satuan, isActive } = req.body;
-    const doc = await SparePartStock.create({
-      nama,
-      kategori: kategori || '',
-      hargaBeli: Number(hargaBeli) || 0,
-      hargaJual: Number(hargaJual) || 0,
-      stok: Number(stok) || 0,
-      satuan: satuan || 'unit',
-      cabang: cabangId,
-      isActive: isActive !== undefined ? !!isActive : true,
+    const stokAwal = Number(stok) || 0;
+    let saved;
+
+    await session.withTransaction(async () => {
+      const [doc] = await SparePartStock.create([{
+        nama,
+        kategori: kategori || '',
+        hargaBeli: Number(hargaBeli) || 0,
+        hargaJual: Number(hargaJual) || 0,
+        stok: stokAwal,
+        satuan: satuan || 'unit',
+        cabang: cabangId,
+        isActive: isActive !== undefined ? !!isActive : true,
+      }], { session });
+
+      if (stokAwal > 0) {
+        await SparePartLog.create([{
+          sparepart: doc._id,
+          cabang: doc.cabang,
+          jenis: 'masuk',
+          jumlah: stokAwal,
+          stokSebelum: 0,
+          stokSesudah: stokAwal,
+          keterangan: 'Stok awal',
+          createdBy: req.user._id,
+        }], { session });
+      }
+
+      saved = doc;
     });
-    res.status(201).json({ success: true, data: doc });
+
+    res.status(201).json({ success: true, data: saved });
   } catch (err) {
     res.status(err.status || 500).json({ success: false, message: err.message });
+  } finally {
+    session.endSession();
   }
 };
 
@@ -116,6 +141,7 @@ exports.deleteSparepart = async (req, res) => {
 
 // POST /api/sparepart/:id/add-stock
 exports.addStock = async (req, res) => {
+  const session = await mongoose.startSession();
   try {
     const jumlah = Number(req.body.jumlah);
     if (!jumlah || jumlah <= 0) {
@@ -123,12 +149,114 @@ exports.addStock = async (req, res) => {
     }
 
     const cabangQ = req.cabangFilter || {};
-    const doc = await SparePartStock.findOne({ _id: req.params.id, ...cabangQ });
-    if (!doc) return res.status(404).json({ success: false, message: 'Sparepart tidak ditemukan' });
+    let notFound = false;
+    let saved;
 
-    doc.stok = (doc.stok || 0) + jumlah;
-    await doc.save();
-    res.json({ success: true, data: doc, message: 'Stok berhasil ditambahkan' });
+    await session.withTransaction(async () => {
+      const doc = await SparePartStock.findOne({ _id: req.params.id, ...cabangQ }).session(session);
+      if (!doc) { notFound = true; return; }
+
+      const stokSebelum = doc.stok || 0;
+      doc.stok = stokSebelum + jumlah;
+      await doc.save({ session });
+
+      await SparePartLog.create([{
+        sparepart: doc._id,
+        cabang: doc.cabang,
+        jenis: 'masuk',
+        jumlah,
+        hargaBeli: Number(req.body.hargaBeli) || 0,
+        stokSebelum,
+        stokSesudah: doc.stok,
+        keterangan: req.body.keterangan || 'Tambah stok',
+        createdBy: req.user._id,
+      }], { session });
+
+      saved = doc;
+    });
+
+    if (notFound) return res.status(404).json({ success: false, message: 'Sparepart tidak ditemukan' });
+    res.json({ success: true, data: saved, message: 'Stok berhasil ditambahkan' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  } finally {
+    session.endSession();
+  }
+};
+
+// GET /api/sparepart/:id/log — riwayat per sparepart
+exports.getSparePartLog = async (req, res) => {
+  try {
+    const cabangQ = req.cabangFilter || {};
+    const sparepart = await SparePartStock.findOne({ _id: req.params.id, ...cabangQ });
+    if (!sparepart) return res.status(404).json({ success: false, message: 'Sparepart tidak ditemukan' });
+
+    const page  = Math.max(parseInt(req.query.page)  || 1, 1);
+    const limit = Math.max(parseInt(req.query.limit) || 20, 1);
+    const skip  = (page - 1) * limit;
+
+    const query = { sparepart: sparepart._id };
+    if (req.query.jenis && ['masuk', 'keluar'].includes(req.query.jenis)) {
+      query.jenis = req.query.jenis;
+    }
+
+    const total = await SparePartLog.countDocuments(query);
+    const data  = await SparePartLog.find(query)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .populate('createdBy', 'name')
+      .populate('serviceTransaction', 'invoiceNumber');
+
+    res.json({
+      success: true,
+      data,
+      total,
+      page,
+      totalPages: Math.max(Math.ceil(total / limit), 1),
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// GET /api/sparepart/logs/pembelian — semua log 'masuk' per cabang
+exports.getLogPembelian = async (req, res) => {
+  try {
+    const cabangQ = req.cabangFilter || {};
+    const page  = Math.max(parseInt(req.query.page)  || 1, 1);
+    const limit = Math.max(parseInt(req.query.limit) || 20, 1);
+    const skip  = (page - 1) * limit;
+
+    const query = { ...cabangQ, jenis: 'masuk' };
+    if (req.query.sparepart && mongoose.isValidObjectId(req.query.sparepart)) {
+      query.sparepart = req.query.sparepart;
+    }
+    if (req.query.startDate || req.query.endDate) {
+      query.createdAt = {};
+      if (req.query.startDate) query.createdAt.$gte = new Date(req.query.startDate);
+      if (req.query.endDate) {
+        const e = new Date(req.query.endDate);
+        e.setHours(23, 59, 59, 999);
+        query.createdAt.$lte = e;
+      }
+    }
+
+    const total = await SparePartLog.countDocuments(query);
+    const data  = await SparePartLog.find(query)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .populate('sparepart', 'nama')
+      .populate('createdBy', 'name');
+
+    res.json({
+      success: true,
+      data,
+      total,
+      page,
+      totalPages: Math.max(Math.ceil(total / limit), 1),
+    });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

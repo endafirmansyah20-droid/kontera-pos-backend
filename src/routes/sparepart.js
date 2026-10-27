@@ -7,6 +7,11 @@ router.use(cabangFilterWithOwner);
 
 router.get   ('/',              ctrl.getSpareparts);
 router.post  ('/',              ctrl.createSparepart);
+
+// Route literal harus di atas /:id
+router.get   ('/logs/pembelian',ctrl.getLogPembelian);
+
+router.get   ('/:id/log',       ctrl.getSparePartLog);
 router.get   ('/:id',           ctrl.getSparepart);
 router.put   ('/:id',           ctrl.updateSparepart);
 router.delete('/:id',           adminOnly, ctrl.deleteSparepart);

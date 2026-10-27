@@ -3,6 +3,7 @@ const ServiceTransaction = require('../models/ServiceTransaction');
 const ServiceFinance     = require('../models/ServiceFinance');
 const ServiceClosing     = require('../models/ServiceClosing');
 const SparePartStock     = require('../models/SparePartStock');
+const SparePartLog       = require('../models/SparePartLog');
 const { Customer, Settings } = require('../models/index');
 
 // ─── Status label ─────────────────────────────────────────────────────────
@@ -80,6 +81,7 @@ exports.create = async (req, res) => {
       const doc = new ServiceTransaction({ ...req.body, createdBy: req.user._id, cabang: cabangId });
 
       const items = Array.isArray(req.body.sparepartItems) ? req.body.sparepartItems : [];
+      const logTrail = [];
       for (const item of items) {
         if (item.source !== 'stok') continue;
         if (!item.sparepartId) throw new Error('sparepartId wajib untuk item dari stok');
@@ -92,11 +94,35 @@ exports.create = async (req, res) => {
         if ((sp.stok || 0) < item.qty) {
           throw new Error(`Stok sparepart ${sp.nama} tidak mencukupi (tersedia ${sp.stok})`);
         }
-        sp.stok -= item.qty;
+        const stokSebelum = sp.stok;
+        sp.stok = stokSebelum - item.qty;
         await sp.save({ session });
+
+        logTrail.push({
+          sparepart: sp._id,
+          cabang: sp.cabang,
+          jumlah: item.qty,
+          hargaBeli: Number(item.hargaBeli) || 0,
+          stokSebelum,
+          stokSesudah: sp.stok,
+        });
       }
 
       await doc.save({ session });
+
+      if (logTrail.length > 0) {
+        await SparePartLog.create(
+          logTrail.map(t => ({
+            ...t,
+            jenis: 'keluar',
+            keterangan: `Servis ${doc.invoiceNumber}`,
+            serviceTransaction: doc._id,
+            createdBy: req.user._id,
+          })),
+          { session }
+        );
+      }
+
       saved = doc;
     });
 
@@ -172,13 +198,32 @@ exports.voidService = async (req, res) => {
 
       // Restore stok sparepart yang sumbernya dari stok
       const items = Array.isArray(doc.sparepartItems) ? doc.sparepartItems : [];
+      const logEntries = [];
       for (const item of items) {
         if (item.source !== 'stok' || !item.sparepartId) continue;
         const sp = await SparePartStock.findById(item.sparepartId).session(session);
         if (sp) {
-          sp.stok = (sp.stok || 0) + item.qty;
+          const stokSebelum = sp.stok || 0;
+          sp.stok = stokSebelum + item.qty;
           await sp.save({ session });
+
+          logEntries.push({
+            sparepart: sp._id,
+            cabang: sp.cabang,
+            jenis: 'masuk',
+            jumlah: item.qty,
+            hargaBeli: 0,
+            stokSebelum,
+            stokSesudah: sp.stok,
+            keterangan: `Void servis ${doc.invoiceNumber}`,
+            serviceTransaction: doc._id,
+            createdBy: req.user._id,
+          });
         }
+      }
+
+      if (logEntries.length > 0) {
+        await SparePartLog.create(logEntries, { session });
       }
 
       doc.isVoid = true;

@@ -73,6 +73,7 @@ app.use('/api/closing-kas', require('./routes/closingKas'));
 app.use('/api/pembelian', require('./routes/pembelian'));
 app.use('/api/service',  require('./routes/service'));
 app.use('/api/sparepart',require('./routes/sparepart'));
+app.use('/api/service-price', require('./routes/servicePrice'));
 app.use('/api/points',   require('./routes/points'));
 app.use('/api/cabang',   require('./routes/cabang'));
 app.use('/api/owner',    require('./routes/owner'));

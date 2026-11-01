@@ -23,7 +23,7 @@ exports.getAll = async (req, res) => {
     const cabangQ = req.cabangFilter || {};
     const query = { isVoid: { $ne: true }, ...cabangQ };
 
-    // Auto filter: bulan berjalan + semua transaksi aktif (belum diambil/batal) dari bulan sebelumnya
+    // Auto filter: bulan berjalan + transaksi lama yang baru selesai bulan ini + transaksi aktif bulan sebelumnya
     if (!startDate && !endDate) {
       const now = new Date();
       const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
@@ -31,6 +31,7 @@ exports.getAll = async (req, res) => {
       query.$and = [{
         $or: [
           { receivedAt: { $gte: startOfMonth, $lte: endOfMonth } },
+          { completedAt: { $gte: startOfMonth, $lte: endOfMonth } },
           { status: { $nin: ['diambil', 'batal'] }, receivedAt: { $lt: startOfMonth } }
         ]
       }];
@@ -152,6 +153,11 @@ exports.update = async (req, res) => {
     }
     if (isPaid && !doc.isPaid) {
       req.body.paidAt = new Date();
+    }
+
+    // Tracking tanggal selesai (diambil/batal). Hanya saat status benar-benar transisi.
+    if (status !== undefined && status !== doc.status) {
+      req.body.completedAt = (status === 'diambil' || status === 'batal') ? new Date() : null;
     }
 
     const wasNotDiambil = doc.status !== 'diambil';
@@ -498,11 +504,11 @@ exports.getArsipList = async (req, res) => {
     const now     = new Date();
     const bulanIni = new Date(now.getFullYear(), now.getMonth(), 1);
 
-    // Aggregate transaksi per bulan (selain bulan berjalan) — hanya transaksi yang sudah diambil/batal
+    // Aggregate transaksi per bulan (berdasarkan completedAt, bulan selain bulan berjalan)
     const result = await ServiceTransaction.aggregate([
-      { $match: { isVoid: { $ne: true }, status: { $in: ['diambil', 'batal'] }, receivedAt: { $lt: bulanIni }, ...cabangQ } },
+      { $match: { isVoid: { $ne: true }, status: { $in: ['diambil', 'batal'] }, completedAt: { $lt: bulanIni, $ne: null }, ...cabangQ } },
       { $group: {
-        _id: { tahun: { $year: '$receivedAt' }, bulan: { $month: '$receivedAt' } },
+        _id: { tahun: { $year: '$completedAt' }, bulan: { $month: '$completedAt' } },
         jumlahTx: { $sum: 1 },
         omset: { $sum: { $cond: ['$isPaid', '$totalCost', 0] } },
         laba:  { $sum: { $cond: ['$isPaid', '$profit',   0] } },
@@ -533,7 +539,7 @@ exports.getArsipDetail = async (req, res) => {
     const txs = await ServiceTransaction.find({
       isVoid: { $ne: true },
       status: { $in: ['diambil', 'batal'] },
-      receivedAt: { $gte: start, $lte: end },
+      completedAt: { $gte: start, $lte: end },
       ...cabangQ
     }).sort({ receivedAt: -1 }).populate('createdBy', 'name');
 

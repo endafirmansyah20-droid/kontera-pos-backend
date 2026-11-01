@@ -53,6 +53,7 @@ const serviceTransactionSchema = new mongoose.Schema({
   // ── Tanggal masuk & estimasi selesai ──────────────────────
   receivedAt:    { type: Date, default: Date.now },
   estimatedDone: { type: Date },
+  completedAt:   { type: Date, default: null },  // Diisi saat status jadi diambil/batal
 
   // ── Keuangan servis terpisah ───────────────────────────────
   // Pengeluaran khusus servis dicatat di ServiceFinance

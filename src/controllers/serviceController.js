@@ -498,9 +498,9 @@ exports.getArsipList = async (req, res) => {
     const now     = new Date();
     const bulanIni = new Date(now.getFullYear(), now.getMonth(), 1);
 
-    // Aggregate transaksi per bulan (selain bulan berjalan)
+    // Aggregate transaksi per bulan (selain bulan berjalan) — hanya transaksi yang sudah diambil/batal
     const result = await ServiceTransaction.aggregate([
-      { $match: { isVoid: { $ne: true }, receivedAt: { $lt: bulanIni }, ...cabangQ } },
+      { $match: { isVoid: { $ne: true }, status: { $in: ['diambil', 'batal'] }, receivedAt: { $lt: bulanIni }, ...cabangQ } },
       { $group: {
         _id: { tahun: { $year: '$receivedAt' }, bulan: { $month: '$receivedAt' } },
         jumlahTx: { $sum: 1 },
@@ -532,6 +532,7 @@ exports.getArsipDetail = async (req, res) => {
 
     const txs = await ServiceTransaction.find({
       isVoid: { $ne: true },
+      status: { $in: ['diambil', 'batal'] },
       receivedAt: { $gte: start, $lte: end },
       ...cabangQ
     }).sort({ receivedAt: -1 }).populate('createdBy', 'name');

@@ -23,13 +23,17 @@ exports.getAll = async (req, res) => {
     const cabangQ = req.cabangFilter || {};
     const query = { isVoid: { $ne: true }, ...cabangQ };
 
-    // Auto filter bulan berjalan (kecuali ada filter tanggal manual)
+    // Auto filter: bulan berjalan + semua transaksi aktif (belum diambil/batal) dari bulan sebelumnya
     if (!startDate && !endDate) {
       const now = new Date();
-      query.receivedAt = {
-        $gte: new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0),
-        $lte: new Date(now.getFullYear(), now.getMonth()+1, 0, 23, 59, 59, 999)
-      };
+      const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+      const endOfMonth   = new Date(now.getFullYear(), now.getMonth()+1, 0, 23, 59, 59, 999);
+      query.$and = [{
+        $or: [
+          { receivedAt: { $gte: startOfMonth, $lte: endOfMonth } },
+          { status: { $nin: ['diambil', 'batal'] }, receivedAt: { $lt: startOfMonth } }
+        ]
+      }];
     }
 
     if (status) query.status = status;

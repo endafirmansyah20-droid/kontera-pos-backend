@@ -29,6 +29,27 @@ async function resolveCabangForCreate(req) {
   return req.user.cabang?._id || req.user.cabang || null;
 }
 
+// Normalize hargaList dari body: dukung format baru (hargaList array) & lama (harga + keterangan)
+function parseHargaList(body) {
+  if (Array.isArray(body.hargaList) && body.hargaList.length > 0) {
+    const cleaned = body.hargaList
+      .map(h => ({
+        harga: Number(h?.harga) || 0,
+        keterangan: typeof h?.keterangan === 'string' ? h.keterangan.trim() : '',
+      }))
+      .filter(h => h.harga > 0);
+    return cleaned;
+  }
+  // Fallback: client lama kirim single harga + keterangan
+  if (body.harga !== undefined) {
+    const harga = Number(body.harga) || 0;
+    if (harga > 0) {
+      return [{ harga, keterangan: (body.keterangan || '').trim() }];
+    }
+  }
+  return [];
+}
+
 // GET /api/service-price
 exports.getServicePrices = async (req, res) => {
   try {
@@ -62,14 +83,20 @@ exports.createServicePrice = async (req, res) => {
     const cabangId = await resolveCabangForCreate(req);
     if (!cabangId) return res.status(400).json({ success: false, message: 'Cabang wajib diisi' });
 
-    const { tipeHP, merek, jenisKerusakan, harga, keterangan } = req.body;
+    const { tipeHP, merek, jenisKerusakan } = req.body;
+    const hargaList = parseHargaList(req.body);
+    if (hargaList.length === 0) {
+      return res.status(400).json({ success: false, message: 'Minimal 1 harga wajib diisi' });
+    }
 
     const saved = await ServicePrice.create({
       tipeHP,
       merek,
       jenisKerusakan,
-      harga: Number(harga) || 0,
-      keterangan: keterangan || '',
+      hargaList,
+      // Mirror ke legacy field agar kode lain yang masih baca `harga` tetap jalan
+      harga: hargaList[0].harga,
+      keterangan: hargaList[0].keterangan,
       cabang: cabangId,
     });
 
@@ -86,9 +113,23 @@ exports.updateServicePrice = async (req, res) => {
     const doc = await ServicePrice.findOne({ _id: req.params.id, ...cabangQ });
     if (!doc) return res.status(404).json({ success: false, message: 'Daftar harga service tidak ditemukan' });
 
-    const fields = ['tipeHP', 'merek', 'jenisKerusakan', 'keterangan', 'isActive'];
+    const fields = ['tipeHP', 'merek', 'jenisKerusakan', 'isActive'];
     fields.forEach(f => { if (req.body[f] !== undefined) doc[f] = req.body[f]; });
-    if (req.body.harga !== undefined) doc.harga = Number(req.body.harga) || 0;
+
+    // Hanya replace hargaList/legacy field jika client memang mengirim data harga baru
+    const hasHargaInput = Array.isArray(req.body.hargaList) || req.body.harga !== undefined;
+    if (hasHargaInput) {
+      const hargaList = parseHargaList(req.body);
+      if (hargaList.length === 0) {
+        return res.status(400).json({ success: false, message: 'Minimal 1 harga wajib diisi' });
+      }
+      doc.hargaList  = hargaList;
+      doc.harga      = hargaList[0].harga;
+      doc.keterangan = hargaList[0].keterangan;
+    } else if (req.body.keterangan !== undefined) {
+      // Dukung client lama yang cuma update keterangan tanpa ubah harga
+      doc.keterangan = req.body.keterangan;
+    }
 
     await doc.save();
     res.json({ success: true, data: doc });

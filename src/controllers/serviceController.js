@@ -327,7 +327,7 @@ exports.getSummary = async (req, res) => {
         { $group: { _id: null, total: { $sum: '$amount' } } }
       ]),
       ServiceTransaction.aggregate([
-        { $match: { isVoid: { $ne: true }, isArchived: { $ne: true }, ...cabangQ, $or: [{ receivedAt: dateQ }, { status: { $nin: ["diambil","batal"] }, receivedAt: { $lt: dateQ.$gte } }] } },
+        { $match: { isVoid: { $ne: true }, isArchived: { $ne: true }, ...cabangQ, $or: [{ receivedAt: dateQ }, { completedAt: dateQ }, { status: { $nin: ['diambil','batal'] }, receivedAt: { $lt: dateQ.$gte } }] } },
         { $group: { _id: '$status', count: { $sum: 1 } } }
       ]),
     ]);

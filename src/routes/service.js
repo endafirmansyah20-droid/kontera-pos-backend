@@ -6,6 +6,8 @@ router.use(protect);
 router.use(cabangFilterWithOwner);
 
 // ── Keuangan Servis (harus di atas /:id) ─────────────────────
+router.get ('/finance/arsip',        ctrl.getArsipKeuanganList);
+router.get ('/finance/arsip/detail', ctrl.getArsipKeuanganDetail);
 router.get ('/finance',       ctrl.getFinance);
 router.post('/finance',       ctrl.createFinance);
 router.put   ('/finance/:id', adminOnly, ctrl.updateFinance);

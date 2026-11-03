@@ -264,6 +264,12 @@ exports.getFinance = async (req, res) => {
       query.date = {};
       if (startDate) query.date.$gte = new Date(startDate);
       if (endDate)   { const e = new Date(endDate); e.setHours(23,59,59); query.date.$lte = e; }
+    } else {
+      const now = new Date();
+      query.date = {
+        $gte: new Date(now.getFullYear(), now.getMonth(), 1),
+        $lte: new Date(now.getFullYear(), now.getMonth()+1, 0, 23, 59, 59, 999)
+      };
     }
     const data = await ServiceFinance.find(query).sort({ date: -1 }).populate('createdBy', 'name');
     res.json({ success: true, data });
@@ -557,6 +563,71 @@ exports.getArsipDetail = async (req, res) => {
       bulan, tahun, jumlahTx: txs.length, omset, laba, totalExpense,
       labaBersih: laba - totalExpense,
       transactions: txs
+    }});
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+};
+
+// ══════════════════════════════════════════════════════════════════════════
+// ARSIP KEUANGAN SERVICE — otomatis per bulan (bulan sebelum bulan ini)
+// ══════════════════════════════════════════════════════════════════════════
+
+// GET /api/service/finance/arsip — list bulan yang ada arsip keuangannya
+exports.getArsipKeuanganList = async (req, res) => {
+  try {
+    const cabangQ  = req.cabangFilter || {};
+    const now      = new Date();
+    const bulanIni = new Date(now.getFullYear(), now.getMonth(), 1);
+
+    const result = await ServiceFinance.aggregate([
+      { $match: { date: { $lt: bulanIni }, ...cabangQ } },
+      { $group: {
+        _id: { tahun: { $year: '$date' }, bulan: { $month: '$date' } },
+        jumlahCatatan:    { $sum: 1 },
+        totalPemasukan:   { $sum: { $cond: [{ $eq: ['$type', 'pemasukan'] },   '$amount', 0] } },
+        totalPengeluaran: { $sum: { $cond: [{ $eq: ['$type', 'pengeluaran'] }, '$amount', 0] } },
+      }},
+      { $sort: { '_id.tahun': -1, '_id.bulan': -1 } }
+    ]);
+
+    const BULAN = ['','Januari','Februari','Maret','April','Mei','Juni','Juli','Agustus','September','Oktober','November','Desember'];
+    const data  = result.map(r => ({
+      bulan: r._id.bulan, tahun: r._id.tahun,
+      label: `${BULAN[r._id.bulan]} ${r._id.tahun}`,
+      jumlahCatatan: r.jumlahCatatan,
+      totalPemasukan: r.totalPemasukan,
+      totalPengeluaran: r.totalPengeluaran,
+    }));
+
+    res.json({ success: true, data });
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+};
+
+// GET /api/service/finance/arsip/detail?bulan=&tahun= — detail catatan keuangan bulan tertentu
+exports.getArsipKeuanganDetail = async (req, res) => {
+  try {
+    const cabangQ = req.cabangFilter || {};
+    const bulan   = parseInt(req.query.bulan);
+    const tahun   = parseInt(req.query.tahun);
+    if (!bulan || !tahun) return res.status(400).json({ success: false, message: 'bulan dan tahun wajib diisi' });
+
+    const start = new Date(tahun, bulan - 1, 1, 0, 0, 0, 0);
+    const end   = new Date(tahun, bulan, 0, 23, 59, 59, 999);
+
+    const data = await ServiceFinance.find({ date: { $gte: start, $lte: end }, ...cabangQ })
+      .sort({ date: -1 })
+      .populate('createdBy', 'name');
+
+    const totalPemasukan   = data.filter(d => d.type === 'pemasukan').reduce((s, d) => s + d.amount, 0);
+    const totalPengeluaran = data.filter(d => d.type === 'pengeluaran').reduce((s, d) => s + d.amount, 0);
+
+    const BULAN = ['','Januari','Februari','Maret','April','Mei','Juni','Juli','Agustus','September','Oktober','November','Desember'];
+
+    res.json({ success: true, data: {
+      label: `${BULAN[bulan]} ${tahun}`,
+      bulan, tahun,
+      jumlahCatatan: data.length,
+      totalPemasukan, totalPengeluaran,
+      catatan: data,
     }});
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };

@@ -83,7 +83,7 @@ serviceTransactionSchema.pre('save', async function (next) {
 serviceTransactionSchema.pre('save', function (next) {
   if (Array.isArray(this.sparepartItems) && this.sparepartItems.length > 0) {
     this.partsCost = this.sparepartItems.reduce(
-      (sum, item) => sum + ((item.hargaJual || 0) * (item.qty || 0)), 0
+      (sum, item) => sum + ((item.hargaBeli || 0) * (item.qty || 0)), 0
     );
   }
   this.totalCost = this.serviceFee || 0;           // Total bayar pelanggan = Biaya Service HP

@@ -71,7 +71,41 @@ exports.getServicePrices = async (req, res) => {
     }
 
     const data = await ServicePrice.find(query).sort({ merek: 1, tipeHP: 1, jenisKerusakan: 1 });
-    res.json({ success: true, data });
+
+    // Group by tipeHP; item tanpa tipeHP masuk ke grup 'Lainnya'
+    const groupMap = new Map();
+    for (const item of data) {
+      const tipe = (item.tipeHP && item.tipeHP.trim()) || 'Lainnya';
+      if (!groupMap.has(tipe)) groupMap.set(tipe, []);
+      groupMap.get(tipe).push(item);
+    }
+    const grouped = Array.from(groupMap.entries())
+      .map(([tipeHP, items]) => ({ tipeHP, items }))
+      .sort((a, b) => a.tipeHP.localeCompare(b.tipeHP));
+
+    res.json({ success: true, data: grouped });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// GET /api/service-price/tipe — list distinct tipeHP untuk dropdown filter
+exports.getTipeHPList = async (req, res) => {
+  try {
+    const cabangQ = req.cabangFilter || {};
+    const rawTipes = await ServicePrice.distinct('tipeHP', { ...cabangQ, isActive: true });
+
+    const set = new Set();
+    let hasEmpty = false;
+    for (const t of rawTipes) {
+      const v = (t || '').trim();
+      if (v) set.add(v);
+      else hasEmpty = true;
+    }
+    const list = Array.from(set).sort((a, b) => a.localeCompare(b));
+    if (hasEmpty) list.push('Lainnya');
+
+    res.json({ success: true, data: list });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

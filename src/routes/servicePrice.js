@@ -5,6 +5,7 @@ const { protect, adminOnly, cabangFilterWithOwner } = require('../middleware/aut
 router.use(protect);
 router.use(cabangFilterWithOwner);
 
+router.get   ('/tipe', ctrl.getTipeHPList);
 router.get   ('/',    ctrl.getServicePrices);
 router.post  ('/',    ctrl.createServicePrice);
 router.put   ('/:id', ctrl.updateServicePrice);

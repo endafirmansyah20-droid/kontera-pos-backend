@@ -6,7 +6,7 @@ const hargaItemSchema = new mongoose.Schema({
 }, { _id: false });
 
 const servicePriceSchema = new mongoose.Schema({
-  tipeHP:         { type: String, required: true, trim: true },
+  tipeHP:         { type: String, default: '', trim: true },
   merek:          { type: String, required: true, trim: true },
   jenisKerusakan: { type: String, required: true, trim: true },
   hargaList:      { type: [hargaItemSchema], default: [] },

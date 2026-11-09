@@ -51,6 +51,7 @@ const settingsSchema = new mongoose.Schema({
   brankasAmount: { type: Number, default: 0 },
   cabang: { type: mongoose.Schema.Types.ObjectId, ref: 'Cabang', index: true },
   targetOmset: { type: Number, default: 0 }, // Target omset bulanan per cabang
+  targetTransaksi: { type: Number, default: 0 }, // Target jumlah transaksi bulanan per cabang
   // ── Pengaturan Poin Member ─────────────────────
   pointSettings: {
     pointPerRupiah:   { type: Number, default: 50 },

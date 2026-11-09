@@ -1744,17 +1744,21 @@ exports.getTargetOmset = async (req, res) => {
       { $group: { _id: null, omset: { $sum: '$total' }, laba: { $sum: '$totalProfit' }, count: { $sum: 1 } } }
     ]);
 
-    const omsetBulanIni = agg[0]?.omset || 0;
-    const targetOmset   = s.targetOmset || 0;
-    const persentase    = targetOmset > 0 ? Math.min(Math.round((omsetBulanIni / targetOmset) * 100), 100) : 0;
-    const sisaHari      = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate() - now.getDate();
+    const omsetBulanIni  = agg[0]?.omset || 0;
+    const jumlahTx       = agg[0]?.count || 0;
+    const targetOmset    = s.targetOmset || 0;
+    const targetTransaksi = s.targetTransaksi || 0;
+    const persentase     = targetOmset > 0 ? Math.min(Math.round((omsetBulanIni / targetOmset) * 100), 100) : 0;
+    const persentaseTransaksi = targetTransaksi > 0 ? Math.min(Math.round((jumlahTx / targetTransaksi) * 100), 100) : 0;
+    const sisaHari       = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate() - now.getDate();
 
     res.json({
       success: true,
       data: {
-        targetOmset, omsetBulanIni, persentase, sisaHari,
+        targetOmset, targetTransaksi,
+        omsetBulanIni, persentase, persentaseTransaksi, sisaHari,
         laba: agg[0]?.laba || 0,
-        jumlahTx: agg[0]?.count || 0,
+        jumlahTx,
         bulan: now.toLocaleString('id-ID', { month: 'long', year: 'numeric' })
       }
     });
@@ -1763,8 +1767,20 @@ exports.getTargetOmset = async (req, res) => {
 
 exports.setTargetOmset = async (req, res) => {
   try {
-    const { targetOmset } = req.body;
-    if (!targetOmset || isNaN(targetOmset)) return res.status(400).json({ success: false, message: 'Target omset tidak valid' });
+    const { targetOmset, targetTransaksi } = req.body;
+
+    const hasOmset    = targetOmset    !== undefined && targetOmset    !== null && targetOmset    !== '';
+    const hasTransaksi = targetTransaksi !== undefined && targetTransaksi !== null && targetTransaksi !== '';
+
+    if (!hasOmset && !hasTransaksi) {
+      return res.status(400).json({ success: false, message: 'Minimal salah satu target (omset/transaksi) wajib diisi' });
+    }
+    if (hasOmset && isNaN(targetOmset)) {
+      return res.status(400).json({ success: false, message: 'Target omset tidak valid' });
+    }
+    if (hasTransaksi && isNaN(targetTransaksi)) {
+      return res.status(400).json({ success: false, message: 'Target transaksi tidak valid' });
+    }
 
     const cabangFilter = req.cabangFilter || {};
     // Cari settings per cabang dulu, fallback ke settings lama, baru buat baru
@@ -1775,10 +1791,15 @@ exports.setTargetOmset = async (req, res) => {
     // Pastikan cabang ter-set agar konsisten
     if (cabangFilter.cabang && !s.cabang) s.cabang = cabangFilter.cabang;
 
-    s.targetOmset = Number(targetOmset);
+    if (hasOmset)     s.targetOmset     = Number(targetOmset);
+    if (hasTransaksi) s.targetTransaksi = Number(targetTransaksi);
     await s.save();
 
-    res.json({ success: true, message: 'Target omset berhasil disimpan', data: { targetOmset: s.targetOmset } });
+    res.json({
+      success: true,
+      message: 'Target berhasil disimpan',
+      data: { targetOmset: s.targetOmset, targetTransaksi: s.targetTransaksi }
+    });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
 

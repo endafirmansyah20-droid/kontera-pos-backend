@@ -46,6 +46,14 @@ exports.superAdminOnly = (req, res, next) => {
   next();
 };
 
+// Hanya owner (dan superadmin sebagai override) yang boleh akses.
+exports.ownerOnly = (req, res, next) => {
+  if (!['owner', 'superadmin'].includes(req.user?.role)) {
+    return res.status(403).json({ success: false, message: 'Akses owner diperlukan' });
+  }
+  next();
+};
+
 // Middleware: otomatis filter query berdasarkan cabang user
 // SuperAdmin: bisa lihat semua atau filter per cabang
 // Admin/Karyawan: STRICT — hanya data cabangnya, data null tidak ikut

@@ -622,6 +622,8 @@ exports.getCabangSummary = async (req, res) => {
         return {
           _id: c._id, nama: c.nama, kode: c.kode, isActive: c.isActive,
           alamat: c.alamat, telepon: c.telepon, createdAt: c.createdAt,
+          targetOmset: c.targetOmset || 0,
+          targetTransaksi: c.targetTransaksi || 0,
           harian:   { omset: harian[0]?.omset||0,   laba: harian[0]?.laba||0,   count: harian[0]?.count||0   },
           mingguan: { omset: mingguan[0]?.omset||0,  laba: mingguan[0]?.laba||0,  count: mingguan[0]?.count||0  },
           bulanan:  { omset: bulanan[0]?.omset||0,   laba: bulanan[0]?.laba||0,   count: bulanan[0]?.count||0   },

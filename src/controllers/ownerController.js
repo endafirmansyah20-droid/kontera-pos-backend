@@ -1226,6 +1226,45 @@ exports.toggleCabang = async (req, res) => {
   }
 };
 
+// ── Set Target Cabang (Owner) ──────────────────────────────────────
+// PUT /api/owner/cabang/:id/target
+// Body: { targetOmset?, targetTransaksi? } — minimal salah satu.
+exports.setTargetCabang = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'Cabang tidak valid' });
+    }
+
+    const cabang = await Cabang.findOne({ _id: id, owner: req.user._id });
+    if (!cabang) {
+      return res.status(403).json({ success: false, message: 'Cabang bukan milik kamu' });
+    }
+
+    const { targetOmset, targetTransaksi } = req.body;
+    const hasOmset     = targetOmset     !== undefined && targetOmset     !== null && targetOmset     !== '';
+    const hasTransaksi = targetTransaksi !== undefined && targetTransaksi !== null && targetTransaksi !== '';
+
+    if (!hasOmset && !hasTransaksi) {
+      return res.status(400).json({ success: false, message: 'Minimal salah satu target (omset/transaksi) wajib diisi' });
+    }
+    if (hasOmset && (isNaN(targetOmset) || Number(targetOmset) < 0)) {
+      return res.status(400).json({ success: false, message: 'Target omset tidak valid' });
+    }
+    if (hasTransaksi && (isNaN(targetTransaksi) || Number(targetTransaksi) < 0)) {
+      return res.status(400).json({ success: false, message: 'Target transaksi tidak valid' });
+    }
+
+    if (hasOmset)     cabang.targetOmset     = Number(targetOmset);
+    if (hasTransaksi) cabang.targetTransaksi = Number(targetTransaksi);
+    await cabang.save();
+
+    res.json({ success: true, message: 'Target cabang berhasil disimpan', data: cabang });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 
 // ══════════════════════════════════════════════════════════════════════════
 // SERVICE HP — Halaman Owner (cross-cabang)

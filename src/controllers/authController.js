@@ -96,7 +96,14 @@ exports.googleLogin = async (req, res) => {
 };
 
 exports.getMe = async (req, res) => {
-  res.json({ success: true, user: req.user });
+  try {
+    const user = await User.findById(req.user._id)
+      .populate('cabang', 'nama kode targetOmset targetTransaksi');
+    if (!user) return res.status(404).json({ success: false, message: 'User tidak ditemukan' });
+    res.json({ success: true, user });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
 };
 
 exports.getUsers = async (req, res) => {

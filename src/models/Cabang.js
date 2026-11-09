@@ -14,6 +14,9 @@ const cabangSchema = new mongoose.Schema({
     lat: { type: Number, default: null },
     lng: { type: Number, default: null },
   },
+  // Target bulanan per cabang (di-set oleh owner via /api/owner/cabang/:id/target)
+  targetOmset:     { type: Number, default: 0 },
+  targetTransaksi: { type: Number, default: 0 },
 }, { timestamps: true });
 
 module.exports = mongoose.model('Cabang', cabangSchema);

@@ -9,7 +9,7 @@ const {
   getServiceSummary, getServiceList, getServiceDetail, getServiceAnalytics,
   getClosingRiwayat, getClosingDetail,
   getPembelianRiwayat, getPembelianDetail, getOwnerReportsMonthly,
-  getOwnerNotifications
+  getOwnerNotifications, setTargetCabang
 } = require('../controllers/ownerController');
 const {
   ownerListAbsensi, ownerSummaryAbsensi, ownerDetailAbsensi,
@@ -61,6 +61,7 @@ router.patch('/absensi/lembur/:lemburId/approve', protect, ownerOnly, ownerAppro
 router.get('/absensi/:id',                        protect, ownerOnly, ownerDetailAbsensi);
 router.patch('/absensi/:id/approve',              protect, ownerOnly, ownerApproveAbsensi);
 router.patch('/cabang/:id/lokasi',                protect, ownerOnly, ownerSetCabangLokasi);
+router.put  ('/cabang/:id/target',                protect, ownerOnly, setTargetCabang);
 
 // ── SuperAdmin ──────────────────────────────────────────────────────────────
 router.get('/subscriptions',                      protect, superAdminOnly, getAllSubscriptions);

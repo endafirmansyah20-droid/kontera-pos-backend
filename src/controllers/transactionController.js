@@ -252,7 +252,8 @@ exports.createTransaction = async (req, res) => {
           amount: total,
           relatedParty: customerName,
           reference: transaction.invoiceNumber,
-          createdBy: req.user._id
+          createdBy: req.user._id,
+          cabang: req.user.cabang?._id || req.user.cabang || null
         }], { session });
       }
     });
